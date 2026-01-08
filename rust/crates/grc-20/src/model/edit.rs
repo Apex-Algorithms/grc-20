@@ -1,0 +1,244 @@
+//! Edit structure for batched operations.
+//!
+//! Edits are standalone patches containing a batch of ops with metadata.
+
+use crate::model::{DataType, Id, Op};
+
+/// A batch of operations with metadata (spec Section 4.1).
+///
+/// Edits are standalone patches. They contain no parent references;
+/// ordering is provided by on-chain governance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Edit {
+    /// The edit's unique identifier.
+    pub id: Id,
+    /// Optional human-readable name.
+    pub name: String,
+    /// Author entity IDs.
+    pub authors: Vec<Id>,
+    /// Creation timestamp (metadata only, not used for conflict resolution).
+    pub created_at: i64,
+    /// Operations in this edit.
+    pub ops: Vec<Op>,
+}
+
+impl Edit {
+    /// Creates a new empty edit with the given ID.
+    pub fn new(id: Id) -> Self {
+        Self {
+            id,
+            name: String::new(),
+            authors: Vec::new(),
+            created_at: 0,
+            ops: Vec::new(),
+        }
+    }
+
+    /// Creates a new empty edit with the given ID and name.
+    pub fn with_name(id: Id, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            authors: Vec::new(),
+            created_at: 0,
+            ops: Vec::new(),
+        }
+    }
+}
+
+/// Wire-format dictionaries for encoding/decoding.
+///
+/// These dictionaries map between full IDs and compact indices
+/// within an edit.
+#[derive(Debug, Clone, Default)]
+pub struct WireDictionaries {
+    /// Properties dictionary: (ID, DataType) pairs.
+    pub properties: Vec<(Id, DataType)>,
+    /// Relation type IDs.
+    pub relation_types: Vec<Id>,
+    /// Language entity IDs for localized TEXT values.
+    pub languages: Vec<Id>,
+    /// Object IDs (entities, relations, REF targets).
+    pub objects: Vec<Id>,
+}
+
+impl WireDictionaries {
+    /// Creates empty dictionaries.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Looks up a property ID by index.
+    pub fn get_property(&self, index: usize) -> Option<&(Id, DataType)> {
+        self.properties.get(index)
+    }
+
+    /// Looks up a relation type ID by index.
+    pub fn get_relation_type(&self, index: usize) -> Option<&Id> {
+        self.relation_types.get(index)
+    }
+
+    /// Looks up a language ID by index.
+    ///
+    /// Index 0 means default (no language), returns None.
+    /// Index 1+ maps to languages[index-1].
+    pub fn get_language(&self, index: usize) -> Option<&Id> {
+        if index == 0 {
+            None
+        } else {
+            self.languages.get(index - 1)
+        }
+    }
+
+    /// Looks up an object ID by index.
+    pub fn get_object(&self, index: usize) -> Option<&Id> {
+        self.objects.get(index)
+    }
+}
+
+/// Builder for constructing wire dictionaries during encoding.
+#[derive(Debug, Clone, Default)]
+pub struct DictionaryBuilder {
+    properties: Vec<(Id, DataType)>,
+    property_indices: std::collections::HashMap<Id, usize>,
+    relation_types: Vec<Id>,
+    relation_type_indices: std::collections::HashMap<Id, usize>,
+    languages: Vec<Id>,
+    language_indices: std::collections::HashMap<Id, usize>,
+    objects: Vec<Id>,
+    object_indices: std::collections::HashMap<Id, usize>,
+}
+
+impl DictionaryBuilder {
+    /// Creates a new empty builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds or gets the index for a property.
+    pub fn add_property(&mut self, id: Id, data_type: DataType) -> usize {
+        if let Some(&idx) = self.property_indices.get(&id) {
+            idx
+        } else {
+            let idx = self.properties.len();
+            self.properties.push((id, data_type));
+            self.property_indices.insert(id, idx);
+            idx
+        }
+    }
+
+    /// Adds or gets the index for a relation type.
+    pub fn add_relation_type(&mut self, id: Id) -> usize {
+        if let Some(&idx) = self.relation_type_indices.get(&id) {
+            idx
+        } else {
+            let idx = self.relation_types.len();
+            self.relation_types.push(id);
+            self.relation_type_indices.insert(id, idx);
+            idx
+        }
+    }
+
+    /// Adds or gets the index for a language.
+    ///
+    /// Returns 0 for default (no language), 1+ for actual languages.
+    pub fn add_language(&mut self, id: Option<Id>) -> usize {
+        match id {
+            None => 0,
+            Some(lang_id) => {
+                if let Some(&idx) = self.language_indices.get(&lang_id) {
+                    idx + 1
+                } else {
+                    let idx = self.languages.len();
+                    self.languages.push(lang_id);
+                    self.language_indices.insert(lang_id, idx);
+                    idx + 1
+                }
+            }
+        }
+    }
+
+    /// Adds or gets the index for an object.
+    pub fn add_object(&mut self, id: Id) -> usize {
+        if let Some(&idx) = self.object_indices.get(&id) {
+            idx
+        } else {
+            let idx = self.objects.len();
+            self.objects.push(id);
+            self.object_indices.insert(id, idx);
+            idx
+        }
+    }
+
+    /// Builds the final wire dictionaries.
+    pub fn build(self) -> WireDictionaries {
+        WireDictionaries {
+            properties: self.properties,
+            relation_types: self.relation_types,
+            languages: self.languages,
+            objects: self.objects,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_edit_new() {
+        let id = [1u8; 16];
+        let edit = Edit::new(id);
+        assert_eq!(edit.id, id);
+        assert!(edit.name.is_empty());
+        assert!(edit.authors.is_empty());
+        assert!(edit.ops.is_empty());
+    }
+
+    #[test]
+    fn test_dictionary_builder() {
+        let mut builder = DictionaryBuilder::new();
+
+        let prop1 = [1u8; 16];
+        let prop2 = [2u8; 16];
+
+        // First add returns 0
+        assert_eq!(builder.add_property(prop1, DataType::Text), 0);
+        // Second add of same ID returns same index
+        assert_eq!(builder.add_property(prop1, DataType::Text), 0);
+        // Different ID gets new index
+        assert_eq!(builder.add_property(prop2, DataType::Int64), 1);
+
+        let dicts = builder.build();
+        assert_eq!(dicts.properties.len(), 2);
+        assert_eq!(dicts.properties[0], (prop1, DataType::Text));
+        assert_eq!(dicts.properties[1], (prop2, DataType::Int64));
+    }
+
+    #[test]
+    fn test_language_indexing() {
+        let mut builder = DictionaryBuilder::new();
+
+        let lang1 = [10u8; 16];
+        let lang2 = [20u8; 16];
+
+        // None returns 0
+        assert_eq!(builder.add_language(None), 0);
+        // First language returns 1
+        assert_eq!(builder.add_language(Some(lang1)), 1);
+        // Same language returns same index
+        assert_eq!(builder.add_language(Some(lang1)), 1);
+        // Different language returns 2
+        assert_eq!(builder.add_language(Some(lang2)), 2);
+
+        let dicts = builder.build();
+        assert_eq!(dicts.languages.len(), 2);
+
+        // get_language(0) returns None (default)
+        assert!(dicts.get_language(0).is_none());
+        // get_language(1) returns lang1
+        assert_eq!(dicts.get_language(1), Some(&lang1));
+        // get_language(2) returns lang2
+        assert_eq!(dicts.get_language(2), Some(&lang2));
+    }
+}

@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/grc-20"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/geobrowser/grc-20-rs"
+rust-version = "1.85"
+
+[workspace.dependencies]
+thiserror = "2"
+zstd = "0.13"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "v7"] }
+lazy_static = "1"
+
+# Dev dependencies
+proptest = "1"

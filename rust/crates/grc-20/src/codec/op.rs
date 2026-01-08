@@ -1,0 +1,687 @@
+//! Operation encoding/decoding for GRC-20 binary format.
+//!
+//! Implements the wire format for operations (spec Section 6.4).
+
+use crate::codec::primitives::{Reader, Writer};
+use crate::codec::value::{decode_position, decode_property_value, validate_position};
+use crate::error::{DecodeError, EncodeError};
+use crate::limits::MAX_VALUES_PER_ENTITY;
+use crate::model::{
+    CreateEntity, CreateProperty, CreateRelation, DataType, DeleteEntity, DeleteRelation,
+    DictionaryBuilder, Op, PropertyValue, RelationIdMode, UpdateEntity, UpdateRelation,
+    WireDictionaries,
+};
+
+// Op type constants
+const OP_CREATE_ENTITY: u8 = 1;
+const OP_UPDATE_ENTITY: u8 = 2;
+const OP_DELETE_ENTITY: u8 = 3;
+const OP_CREATE_RELATION: u8 = 4;
+const OP_UPDATE_RELATION: u8 = 5;
+const OP_DELETE_RELATION: u8 = 6;
+const OP_CREATE_PROPERTY: u8 = 7;
+
+// UpdateEntity flags
+const FLAG_HAS_SET_PROPERTIES: u8 = 0x01;
+const FLAG_HAS_ADD_VALUES: u8 = 0x02;
+const FLAG_HAS_REMOVE_VALUES: u8 = 0x04;
+const FLAG_HAS_UNSET_PROPERTIES: u8 = 0x08;
+const FLAG_HAS_REMOVE_VALUES_BY_HASH: u8 = 0x10;
+const UPDATE_ENTITY_RESERVED_MASK: u8 = 0xE0;
+
+// CreateRelation flags
+const FLAG_HAS_POSITION: u8 = 0x01;
+const FLAG_HAS_FROM_SPACE: u8 = 0x02;
+const FLAG_HAS_TO_SPACE: u8 = 0x04;
+const CREATE_RELATION_RESERVED_MASK: u8 = 0xF8;
+
+// Relation ID modes
+const MODE_UNIQUE: u8 = 0;
+const MODE_INSTANCE: u8 = 1;
+
+// =============================================================================
+// DECODING
+// =============================================================================
+
+/// Decodes an Op from the reader.
+pub fn decode_op(reader: &mut Reader, dicts: &WireDictionaries) -> Result<Op, DecodeError> {
+    let op_type = reader.read_byte("op_type")?;
+
+    match op_type {
+        OP_CREATE_ENTITY => decode_create_entity(reader, dicts),
+        OP_UPDATE_ENTITY => decode_update_entity(reader, dicts),
+        OP_DELETE_ENTITY => decode_delete_entity(reader, dicts),
+        OP_CREATE_RELATION => decode_create_relation(reader, dicts),
+        OP_UPDATE_RELATION => decode_update_relation(reader, dicts),
+        OP_DELETE_RELATION => decode_delete_relation(reader, dicts),
+        OP_CREATE_PROPERTY => decode_create_property(reader),
+        _ => Err(DecodeError::InvalidOpType { op_type }),
+    }
+}
+
+fn decode_create_entity(
+    reader: &mut Reader,
+    dicts: &WireDictionaries,
+) -> Result<Op, DecodeError> {
+    let id = reader.read_id("entity_id")?;
+    let value_count = reader.read_varint("value_count")? as usize;
+
+    if value_count > MAX_VALUES_PER_ENTITY {
+        return Err(DecodeError::LengthExceedsLimit {
+            field: "values",
+            len: value_count,
+            max: MAX_VALUES_PER_ENTITY,
+        });
+    }
+
+    let mut values = Vec::with_capacity(value_count);
+    for _ in 0..value_count {
+        values.push(decode_property_value(reader, dicts)?);
+    }
+
+    Ok(Op::CreateEntity(CreateEntity { id, values }))
+}
+
+fn decode_update_entity(
+    reader: &mut Reader,
+    dicts: &WireDictionaries,
+) -> Result<Op, DecodeError> {
+    let id_index = reader.read_varint("entity_id")? as usize;
+    if id_index >= dicts.objects.len() {
+        return Err(DecodeError::IndexOutOfBounds {
+            dict: "objects",
+            index: id_index,
+            size: dicts.objects.len(),
+        });
+    }
+    let id = dicts.objects[id_index];
+
+    let flags = reader.read_byte("update_flags")?;
+
+    // Check reserved bits
+    if flags & UPDATE_ENTITY_RESERVED_MASK != 0 {
+        return Err(DecodeError::ReservedBitsSet {
+            context: "UpdateEntity flags",
+        });
+    }
+
+    let mut update = UpdateEntity::new(id);
+
+    if flags & FLAG_HAS_SET_PROPERTIES != 0 {
+        let count = reader.read_varint("set_properties_count")? as usize;
+        if count > MAX_VALUES_PER_ENTITY {
+            return Err(DecodeError::LengthExceedsLimit {
+                field: "set_properties",
+                len: count,
+                max: MAX_VALUES_PER_ENTITY,
+            });
+        }
+        for _ in 0..count {
+            update.set_properties.push(decode_property_value(reader, dicts)?);
+        }
+    }
+
+    if flags & FLAG_HAS_ADD_VALUES != 0 {
+        let count = reader.read_varint("add_values_count")? as usize;
+        if count > MAX_VALUES_PER_ENTITY {
+            return Err(DecodeError::LengthExceedsLimit {
+                field: "add_values",
+                len: count,
+                max: MAX_VALUES_PER_ENTITY,
+            });
+        }
+        for _ in 0..count {
+            update.add_values.push(decode_property_value(reader, dicts)?);
+        }
+    }
+
+    if flags & FLAG_HAS_REMOVE_VALUES != 0 {
+        let count = reader.read_varint("remove_values_count")? as usize;
+        if count > MAX_VALUES_PER_ENTITY {
+            return Err(DecodeError::LengthExceedsLimit {
+                field: "remove_values",
+                len: count,
+                max: MAX_VALUES_PER_ENTITY,
+            });
+        }
+        for _ in 0..count {
+            update.remove_values.push(decode_property_value(reader, dicts)?);
+        }
+    }
+
+    if flags & FLAG_HAS_UNSET_PROPERTIES != 0 {
+        let count = reader.read_varint("unset_properties_count")? as usize;
+        if count > MAX_VALUES_PER_ENTITY {
+            return Err(DecodeError::LengthExceedsLimit {
+                field: "unset_properties",
+                len: count,
+                max: MAX_VALUES_PER_ENTITY,
+            });
+        }
+        for _ in 0..count {
+            let prop_index = reader.read_varint("property")? as usize;
+            if prop_index >= dicts.properties.len() {
+                return Err(DecodeError::IndexOutOfBounds {
+                    dict: "properties",
+                    index: prop_index,
+                    size: dicts.properties.len(),
+                });
+            }
+            update.unset_properties.push(dicts.properties[prop_index].0);
+        }
+    }
+
+    if flags & FLAG_HAS_REMOVE_VALUES_BY_HASH != 0 {
+        let count = reader.read_varint("remove_by_hash_count")? as usize;
+        if count > MAX_VALUES_PER_ENTITY {
+            return Err(DecodeError::LengthExceedsLimit {
+                field: "remove_values_by_hash",
+                len: count,
+                max: MAX_VALUES_PER_ENTITY,
+            });
+        }
+        for _ in 0..count {
+            let value_id = reader.read_id("value_id")?;
+            update.remove_values_by_hash.push(value_id);
+        }
+    }
+
+    Ok(Op::UpdateEntity(update))
+}
+
+fn decode_delete_entity(
+    reader: &mut Reader,
+    dicts: &WireDictionaries,
+) -> Result<Op, DecodeError> {
+    let id_index = reader.read_varint("entity_id")? as usize;
+    if id_index >= dicts.objects.len() {
+        return Err(DecodeError::IndexOutOfBounds {
+            dict: "objects",
+            index: id_index,
+            size: dicts.objects.len(),
+        });
+    }
+
+    Ok(Op::DeleteEntity(DeleteEntity {
+        id: dicts.objects[id_index],
+    }))
+}
+
+fn decode_create_relation(
+    reader: &mut Reader,
+    dicts: &WireDictionaries,
+) -> Result<Op, DecodeError> {
+    let mode = reader.read_byte("relation_mode")?;
+
+    let id_mode = match mode {
+        MODE_UNIQUE => RelationIdMode::Unique,
+        MODE_INSTANCE => {
+            let id = reader.read_id("relation_id")?;
+            RelationIdMode::Instance(id)
+        }
+        _ => {
+            return Err(DecodeError::MalformedEncoding {
+                context: "invalid relation mode",
+            });
+        }
+    };
+
+    let entity = reader.read_id("entity_id")?;
+
+    let type_index = reader.read_varint("relation_type")? as usize;
+    if type_index >= dicts.relation_types.len() {
+        return Err(DecodeError::IndexOutOfBounds {
+            dict: "relation_types",
+            index: type_index,
+            size: dicts.relation_types.len(),
+        });
+    }
+    let relation_type = dicts.relation_types[type_index];
+
+    let from_index = reader.read_varint("from")? as usize;
+    if from_index >= dicts.objects.len() {
+        return Err(DecodeError::IndexOutOfBounds {
+            dict: "objects",
+            index: from_index,
+            size: dicts.objects.len(),
+        });
+    }
+    let from = dicts.objects[from_index];
+
+    let to_index = reader.read_varint("to")? as usize;
+    if to_index >= dicts.objects.len() {
+        return Err(DecodeError::IndexOutOfBounds {
+            dict: "objects",
+            index: to_index,
+            size: dicts.objects.len(),
+        });
+    }
+    let to = dicts.objects[to_index];
+
+    let flags = reader.read_byte("relation_flags")?;
+
+    // Check reserved bits
+    if flags & CREATE_RELATION_RESERVED_MASK != 0 {
+        return Err(DecodeError::ReservedBitsSet {
+            context: "CreateRelation flags",
+        });
+    }
+
+    let position = if flags & FLAG_HAS_POSITION != 0 {
+        Some(decode_position(reader)?)
+    } else {
+        None
+    };
+
+    let from_space = if flags & FLAG_HAS_FROM_SPACE != 0 {
+        Some(reader.read_id("from_space")?)
+    } else {
+        None
+    };
+
+    let to_space = if flags & FLAG_HAS_TO_SPACE != 0 {
+        Some(reader.read_id("to_space")?)
+    } else {
+        None
+    };
+
+    Ok(Op::CreateRelation(CreateRelation {
+        id_mode,
+        relation_type,
+        from,
+        to,
+        entity,
+        position,
+        from_space,
+        to_space,
+    }))
+}
+
+fn decode_update_relation(
+    reader: &mut Reader,
+    dicts: &WireDictionaries,
+) -> Result<Op, DecodeError> {
+    let id_index = reader.read_varint("relation_id")? as usize;
+    if id_index >= dicts.objects.len() {
+        return Err(DecodeError::IndexOutOfBounds {
+            dict: "objects",
+            index: id_index,
+            size: dicts.objects.len(),
+        });
+    }
+
+    let position = decode_position(reader)?;
+
+    Ok(Op::UpdateRelation(UpdateRelation {
+        id: dicts.objects[id_index],
+        position,
+    }))
+}
+
+fn decode_delete_relation(
+    reader: &mut Reader,
+    dicts: &WireDictionaries,
+) -> Result<Op, DecodeError> {
+    let id_index = reader.read_varint("relation_id")? as usize;
+    if id_index >= dicts.objects.len() {
+        return Err(DecodeError::IndexOutOfBounds {
+            dict: "objects",
+            index: id_index,
+            size: dicts.objects.len(),
+        });
+    }
+
+    Ok(Op::DeleteRelation(DeleteRelation {
+        id: dicts.objects[id_index],
+    }))
+}
+
+fn decode_create_property(reader: &mut Reader) -> Result<Op, DecodeError> {
+    let id = reader.read_id("property_id")?;
+    let data_type_byte = reader.read_byte("data_type")?;
+    let data_type = DataType::from_u8(data_type_byte)
+        .ok_or(DecodeError::InvalidDataType { data_type: data_type_byte })?;
+
+    Ok(Op::CreateProperty(CreateProperty { id, data_type }))
+}
+
+// =============================================================================
+// ENCODING
+// =============================================================================
+
+/// Encodes an Op to the writer.
+///
+/// Note: This function requires that the dictionary builder has already been
+/// populated with all IDs that will be referenced. Call `collect_op_ids` first.
+pub fn encode_op(
+    writer: &mut Writer,
+    op: &Op,
+    dict_builder: &mut DictionaryBuilder,
+    property_types: &std::collections::HashMap<crate::model::Id, DataType>,
+) -> Result<(), EncodeError> {
+    match op {
+        Op::CreateEntity(ce) => encode_create_entity(writer, ce, dict_builder, property_types),
+        Op::UpdateEntity(ue) => encode_update_entity(writer, ue, dict_builder, property_types),
+        Op::DeleteEntity(de) => encode_delete_entity(writer, de, dict_builder),
+        Op::CreateRelation(cr) => encode_create_relation(writer, cr, dict_builder),
+        Op::UpdateRelation(ur) => encode_update_relation(writer, ur, dict_builder),
+        Op::DeleteRelation(dr) => encode_delete_relation(writer, dr, dict_builder),
+        Op::CreateProperty(cp) => encode_create_property(writer, cp),
+    }
+}
+
+fn encode_create_entity(
+    writer: &mut Writer,
+    ce: &CreateEntity,
+    dict_builder: &mut DictionaryBuilder,
+    property_types: &std::collections::HashMap<crate::model::Id, DataType>,
+) -> Result<(), EncodeError> {
+    writer.write_byte(OP_CREATE_ENTITY);
+    writer.write_id(&ce.id);
+    writer.write_varint(ce.values.len() as u64);
+
+    for pv in &ce.values {
+        let data_type = property_types.get(&pv.property)
+            .copied()
+            .unwrap_or_else(|| pv.value.data_type());
+        encode_property_value(writer, pv, dict_builder, data_type)?;
+    }
+
+    Ok(())
+}
+
+fn encode_update_entity(
+    writer: &mut Writer,
+    ue: &UpdateEntity,
+    dict_builder: &mut DictionaryBuilder,
+    property_types: &std::collections::HashMap<crate::model::Id, DataType>,
+) -> Result<(), EncodeError> {
+    writer.write_byte(OP_UPDATE_ENTITY);
+
+    let id_index = dict_builder.add_object(ue.id);
+    writer.write_varint(id_index as u64);
+
+    let mut flags = 0u8;
+    if !ue.set_properties.is_empty() {
+        flags |= FLAG_HAS_SET_PROPERTIES;
+    }
+    if !ue.add_values.is_empty() {
+        flags |= FLAG_HAS_ADD_VALUES;
+    }
+    if !ue.remove_values.is_empty() {
+        flags |= FLAG_HAS_REMOVE_VALUES;
+    }
+    if !ue.unset_properties.is_empty() {
+        flags |= FLAG_HAS_UNSET_PROPERTIES;
+    }
+    if !ue.remove_values_by_hash.is_empty() {
+        flags |= FLAG_HAS_REMOVE_VALUES_BY_HASH;
+    }
+    writer.write_byte(flags);
+
+    if !ue.set_properties.is_empty() {
+        writer.write_varint(ue.set_properties.len() as u64);
+        for pv in &ue.set_properties {
+            let data_type = property_types.get(&pv.property)
+                .copied()
+                .unwrap_or_else(|| pv.value.data_type());
+            encode_property_value(writer, pv, dict_builder, data_type)?;
+        }
+    }
+
+    if !ue.add_values.is_empty() {
+        writer.write_varint(ue.add_values.len() as u64);
+        for pv in &ue.add_values {
+            let data_type = property_types.get(&pv.property)
+                .copied()
+                .unwrap_or_else(|| pv.value.data_type());
+            encode_property_value(writer, pv, dict_builder, data_type)?;
+        }
+    }
+
+    if !ue.remove_values.is_empty() {
+        writer.write_varint(ue.remove_values.len() as u64);
+        for pv in &ue.remove_values {
+            let data_type = property_types.get(&pv.property)
+                .copied()
+                .unwrap_or_else(|| pv.value.data_type());
+            encode_property_value(writer, pv, dict_builder, data_type)?;
+        }
+    }
+
+    if !ue.unset_properties.is_empty() {
+        writer.write_varint(ue.unset_properties.len() as u64);
+        for prop_id in &ue.unset_properties {
+            // We need the data type to add to dictionary, use a placeholder
+            let idx = dict_builder.add_property(*prop_id, DataType::Bool);
+            writer.write_varint(idx as u64);
+        }
+    }
+
+    if !ue.remove_values_by_hash.is_empty() {
+        writer.write_varint(ue.remove_values_by_hash.len() as u64);
+        for value_id in &ue.remove_values_by_hash {
+            writer.write_id(value_id);
+        }
+    }
+
+    Ok(())
+}
+
+fn encode_delete_entity(
+    writer: &mut Writer,
+    de: &DeleteEntity,
+    dict_builder: &mut DictionaryBuilder,
+) -> Result<(), EncodeError> {
+    writer.write_byte(OP_DELETE_ENTITY);
+    let id_index = dict_builder.add_object(de.id);
+    writer.write_varint(id_index as u64);
+    Ok(())
+}
+
+fn encode_create_relation(
+    writer: &mut Writer,
+    cr: &CreateRelation,
+    dict_builder: &mut DictionaryBuilder,
+) -> Result<(), EncodeError> {
+    writer.write_byte(OP_CREATE_RELATION);
+
+    match &cr.id_mode {
+        RelationIdMode::Unique => {
+            writer.write_byte(MODE_UNIQUE);
+        }
+        RelationIdMode::Instance(id) => {
+            writer.write_byte(MODE_INSTANCE);
+            writer.write_id(id);
+        }
+    }
+
+    writer.write_id(&cr.entity);
+
+    let type_index = dict_builder.add_relation_type(cr.relation_type);
+    writer.write_varint(type_index as u64);
+
+    let from_index = dict_builder.add_object(cr.from);
+    writer.write_varint(from_index as u64);
+
+    let to_index = dict_builder.add_object(cr.to);
+    writer.write_varint(to_index as u64);
+
+    let mut flags = 0u8;
+    if cr.position.is_some() {
+        flags |= FLAG_HAS_POSITION;
+    }
+    if cr.from_space.is_some() {
+        flags |= FLAG_HAS_FROM_SPACE;
+    }
+    if cr.to_space.is_some() {
+        flags |= FLAG_HAS_TO_SPACE;
+    }
+    writer.write_byte(flags);
+
+    if let Some(pos) = &cr.position {
+        validate_position(pos)?;
+        writer.write_string(pos);
+    }
+
+    if let Some(space) = &cr.from_space {
+        writer.write_id(space);
+    }
+
+    if let Some(space) = &cr.to_space {
+        writer.write_id(space);
+    }
+
+    Ok(())
+}
+
+fn encode_update_relation(
+    writer: &mut Writer,
+    ur: &UpdateRelation,
+    dict_builder: &mut DictionaryBuilder,
+) -> Result<(), EncodeError> {
+    writer.write_byte(OP_UPDATE_RELATION);
+
+    let id_index = dict_builder.add_object(ur.id);
+    writer.write_varint(id_index as u64);
+
+    validate_position(&ur.position)?;
+    writer.write_string(&ur.position);
+
+    Ok(())
+}
+
+fn encode_delete_relation(
+    writer: &mut Writer,
+    dr: &DeleteRelation,
+    dict_builder: &mut DictionaryBuilder,
+) -> Result<(), EncodeError> {
+    writer.write_byte(OP_DELETE_RELATION);
+    let id_index = dict_builder.add_object(dr.id);
+    writer.write_varint(id_index as u64);
+    Ok(())
+}
+
+fn encode_create_property(writer: &mut Writer, cp: &CreateProperty) -> Result<(), EncodeError> {
+    writer.write_byte(OP_CREATE_PROPERTY);
+    writer.write_id(&cp.id);
+    writer.write_byte(cp.data_type as u8);
+    Ok(())
+}
+
+fn encode_property_value(
+    writer: &mut Writer,
+    pv: &PropertyValue,
+    dict_builder: &mut DictionaryBuilder,
+    data_type: DataType,
+) -> Result<(), EncodeError> {
+    let prop_index = dict_builder.add_property(pv.property, data_type);
+    writer.write_varint(prop_index as u64);
+    crate::codec::value::encode_value(writer, &pv.value, dict_builder)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Value;
+
+    #[test]
+    fn test_create_entity_roundtrip() {
+        let op = Op::CreateEntity(CreateEntity {
+            id: [1u8; 16],
+            values: vec![PropertyValue {
+                property: [2u8; 16],
+                value: Value::Text {
+                    value: "test".to_string(),
+                    language: None,
+                },
+            }],
+        });
+
+        let mut dict_builder = DictionaryBuilder::new();
+        let mut property_types = std::collections::HashMap::new();
+        property_types.insert([2u8; 16], DataType::Text);
+
+        let mut writer = Writer::new();
+        encode_op(&mut writer, &op, &mut dict_builder, &property_types).unwrap();
+
+        let dicts = dict_builder.build();
+        let mut reader = Reader::new(writer.as_bytes());
+        let decoded = decode_op(&mut reader, &dicts).unwrap();
+
+        assert_eq!(op, decoded);
+    }
+
+    #[test]
+    fn test_create_relation_roundtrip() {
+        let op = Op::CreateRelation(CreateRelation {
+            id_mode: RelationIdMode::Instance([10u8; 16]),
+            relation_type: [1u8; 16],
+            from: [2u8; 16],
+            to: [3u8; 16],
+            entity: [4u8; 16],
+            position: Some("abc".to_string()),
+            from_space: None,
+            to_space: None,
+        });
+
+        let mut dict_builder = DictionaryBuilder::new();
+        let property_types = std::collections::HashMap::new();
+
+        let mut writer = Writer::new();
+        encode_op(&mut writer, &op, &mut dict_builder, &property_types).unwrap();
+
+        let dicts = dict_builder.build();
+        let mut reader = Reader::new(writer.as_bytes());
+        let decoded = decode_op(&mut reader, &dicts).unwrap();
+
+        assert_eq!(op, decoded);
+    }
+
+    #[test]
+    fn test_unique_mode_relation() {
+        let op = Op::CreateRelation(CreateRelation {
+            id_mode: RelationIdMode::Unique,
+            relation_type: [1u8; 16],
+            from: [2u8; 16],
+            to: [3u8; 16],
+            entity: [4u8; 16],
+            position: None,
+            from_space: None,
+            to_space: None,
+        });
+
+        let mut dict_builder = DictionaryBuilder::new();
+        let property_types = std::collections::HashMap::new();
+
+        let mut writer = Writer::new();
+        encode_op(&mut writer, &op, &mut dict_builder, &property_types).unwrap();
+
+        let dicts = dict_builder.build();
+        let mut reader = Reader::new(writer.as_bytes());
+        let decoded = decode_op(&mut reader, &dicts).unwrap();
+
+        assert_eq!(op, decoded);
+    }
+
+    #[test]
+    fn test_create_property_roundtrip() {
+        let op = Op::CreateProperty(CreateProperty {
+            id: [1u8; 16],
+            data_type: DataType::Text,
+        });
+
+        let mut dict_builder = DictionaryBuilder::new();
+        let property_types = std::collections::HashMap::new();
+
+        let mut writer = Writer::new();
+        encode_op(&mut writer, &op, &mut dict_builder, &property_types).unwrap();
+
+        let dicts = dict_builder.build();
+        let mut reader = Reader::new(writer.as_bytes());
+        let decoded = decode_op(&mut reader, &dicts).unwrap();
+
+        assert_eq!(op, decoded);
+    }
+}

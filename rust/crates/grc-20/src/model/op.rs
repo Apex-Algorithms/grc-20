@@ -1,0 +1,281 @@
+//! Operation types for GRC-20 state changes.
+//!
+//! All state changes in GRC-20 are expressed as operations (ops).
+
+use crate::model::{DataType, Id, PropertyValue};
+
+/// An atomic operation that modifies graph state (spec Section 3.1).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Op {
+    CreateEntity(CreateEntity),
+    UpdateEntity(UpdateEntity),
+    DeleteEntity(DeleteEntity),
+    CreateRelation(CreateRelation),
+    UpdateRelation(UpdateRelation),
+    DeleteRelation(DeleteRelation),
+    CreateProperty(CreateProperty),
+}
+
+impl Op {
+    /// Returns the op type code for wire encoding.
+    pub fn op_type(&self) -> u8 {
+        match self {
+            Op::CreateEntity(_) => 1,
+            Op::UpdateEntity(_) => 2,
+            Op::DeleteEntity(_) => 3,
+            Op::CreateRelation(_) => 4,
+            Op::UpdateRelation(_) => 5,
+            Op::DeleteRelation(_) => 6,
+            Op::CreateProperty(_) => 7,
+        }
+    }
+}
+
+/// Creates a new entity (spec Section 3.2).
+///
+/// If the entity does not exist, creates it. If it already exists,
+/// this acts as an update: values are applied as set_properties (LWW).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateEntity {
+    /// The entity's unique identifier.
+    pub id: Id,
+    /// Initial values for the entity.
+    pub values: Vec<PropertyValue>,
+}
+
+/// Updates an existing entity (spec Section 3.2).
+///
+/// Application order within op:
+/// 1. unset_properties
+/// 2. set_properties
+/// 3. remove_values
+/// 4. remove_values_by_hash
+/// 5. add_values
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct UpdateEntity {
+    /// The entity to update.
+    pub id: Id,
+    /// Replace entire value set for these properties (LWW).
+    pub set_properties: Vec<PropertyValue>,
+    /// Add values (set union).
+    pub add_values: Vec<PropertyValue>,
+    /// Remove values by content match.
+    pub remove_values: Vec<PropertyValue>,
+    /// Remove values by their value_id hash.
+    pub remove_values_by_hash: Vec<Id>,
+    /// Clear all values for these properties.
+    pub unset_properties: Vec<Id>,
+}
+
+
+impl UpdateEntity {
+    /// Creates a new UpdateEntity for the given entity ID.
+    pub fn new(id: Id) -> Self {
+        Self {
+            id,
+            ..Default::default()
+        }
+    }
+
+    /// Returns true if this update has no actual changes.
+    pub fn is_empty(&self) -> bool {
+        self.set_properties.is_empty()
+            && self.add_values.is_empty()
+            && self.remove_values.is_empty()
+            && self.remove_values_by_hash.is_empty()
+            && self.unset_properties.is_empty()
+    }
+}
+
+/// Deletes an entity (spec Section 3.2).
+///
+/// Appends a tombstone to history. Subsequent updates are ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteEntity {
+    /// The entity to delete.
+    pub id: Id,
+}
+
+/// Relation ID mode for CreateRelation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationIdMode {
+    /// Random ID provided by caller. Multiple relations can exist between same endpoints.
+    Instance(Id),
+    /// Deterministic ID derived from from_id || to_id || type_id.
+    Unique,
+}
+
+/// Creates a new relation (spec Section 3.3).
+///
+/// Also implicitly creates the reified entity if it doesn't exist.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateRelation {
+    /// The relation ID mode.
+    pub id_mode: RelationIdMode,
+    /// The relation type entity ID.
+    pub relation_type: Id,
+    /// Source entity ID.
+    pub from: Id,
+    /// Target entity ID.
+    pub to: Id,
+    /// The reified entity ID for this relation.
+    pub entity: Id,
+    /// Optional ordering position (fractional indexing).
+    pub position: Option<String>,
+    /// Optional space hint for source entity.
+    pub from_space: Option<Id>,
+    /// Optional space hint for target entity.
+    pub to_space: Option<Id>,
+}
+
+impl CreateRelation {
+    /// Computes the actual relation ID.
+    ///
+    /// For instance mode, returns the provided ID.
+    /// For unique mode, derives the ID from from || to || type.
+    pub fn relation_id(&self) -> Id {
+        use crate::model::id::unique_relation_id;
+        match &self.id_mode {
+            RelationIdMode::Instance(id) => *id,
+            RelationIdMode::Unique => unique_relation_id(&self.from, &self.to, &self.relation_type),
+        }
+    }
+}
+
+/// Updates a relation's position (spec Section 3.3).
+///
+/// Only the position field can be updated; all other fields are immutable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateRelation {
+    /// The relation to update.
+    pub id: Id,
+    /// New position for ordering.
+    pub position: String,
+}
+
+/// Deletes a relation (spec Section 3.3).
+///
+/// Appends a tombstone. Does NOT delete the reified entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteRelation {
+    /// The relation to delete.
+    pub id: Id,
+}
+
+/// Creates a new property in the schema (spec Section 3.4).
+///
+/// Properties are immutable once created (first-writer-wins).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateProperty {
+    /// The property's unique identifier.
+    pub id: Id,
+    /// The data type for values of this property.
+    pub data_type: DataType,
+}
+
+/// Validates a position string according to spec rules.
+///
+/// Position strings must:
+/// - Only contain characters 0-9, A-Z, a-z (62 chars, ASCII order)
+/// - Not exceed 64 characters
+pub fn validate_position(pos: &str) -> Result<(), &'static str> {
+    if pos.len() > 64 {
+        return Err("position exceeds 64 characters");
+    }
+    for c in pos.chars() {
+        if !c.is_ascii_alphanumeric() {
+            return Err("position contains invalid character");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_op_type_codes() {
+        assert_eq!(
+            Op::CreateEntity(CreateEntity {
+                id: [0; 16],
+                values: vec![]
+            })
+            .op_type(),
+            1
+        );
+        assert_eq!(Op::UpdateEntity(UpdateEntity::new([0; 16])).op_type(), 2);
+        assert_eq!(Op::DeleteEntity(DeleteEntity { id: [0; 16] }).op_type(), 3);
+    }
+
+    #[test]
+    fn test_validate_position() {
+        assert!(validate_position("abc123").is_ok());
+        assert!(validate_position("aV").is_ok());
+        assert!(validate_position("").is_ok());
+        assert!(validate_position("a").is_ok());
+
+        // Invalid characters
+        assert!(validate_position("abc-123").is_err());
+        assert!(validate_position("abc_123").is_err());
+        assert!(validate_position("abc 123").is_err());
+
+        // Too long (65 chars)
+        let long = "a".repeat(65);
+        assert!(validate_position(&long).is_err());
+
+        // Exactly 64 chars is ok
+        let exact = "a".repeat(64);
+        assert!(validate_position(&exact).is_ok());
+    }
+
+    #[test]
+    fn test_update_entity_is_empty() {
+        let update = UpdateEntity::new([0; 16]);
+        assert!(update.is_empty());
+
+        let mut update2 = UpdateEntity::new([0; 16]);
+        update2.set_properties.push(PropertyValue {
+            property: [1; 16],
+            value: crate::model::Value::Bool(true),
+        });
+        assert!(!update2.is_empty());
+    }
+
+    #[test]
+    fn test_relation_id_computation() {
+        use crate::model::id::unique_relation_id;
+
+        let from = [1u8; 16];
+        let to = [2u8; 16];
+        let rel_type = [3u8; 16];
+        let entity = [4u8; 16];
+
+        // Instance mode returns the provided ID
+        let instance_id = [5u8; 16];
+        let rel_instance = CreateRelation {
+            id_mode: RelationIdMode::Instance(instance_id),
+            relation_type: rel_type,
+            from,
+            to,
+            entity,
+            position: None,
+            from_space: None,
+            to_space: None,
+        };
+        assert_eq!(rel_instance.relation_id(), instance_id);
+
+        // Unique mode derives the ID
+        let rel_unique = CreateRelation {
+            id_mode: RelationIdMode::Unique,
+            relation_type: rel_type,
+            from,
+            to,
+            entity,
+            position: None,
+            from_space: None,
+            to_space: None,
+        };
+        assert_eq!(rel_unique.relation_id(), unique_relation_id(&from, &to, &rel_type));
+    }
+}
