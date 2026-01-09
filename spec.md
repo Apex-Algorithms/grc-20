@@ -276,7 +276,9 @@ Relation {
   from: ID             // Source entity
   to: ID               // Target entity
   from_space: ID?      // Optional space hint for source
+  from_version: ID?    // Optional version (edit ID) to pin source
   to_space: ID?        // Optional space hint for target
+  to_version: ID?      // Optional version (edit ID) to pin target
   position: string?
 }
 ```
@@ -424,24 +426,30 @@ CreateRelation {
   type: ID | index
   from: ID | index
   from_space: ID?          // Optional space hint for source
+  from_version: ID?        // Optional version (edit ID) to pin source
   to: ID | index
   to_space: ID?            // Optional space hint for target
+  to_version: ID?          // Optional version (edit ID) to pin target
   entity: ID               // Reified entity for this relation
   position: string?
 }
 ```
 
-**Semantics (NORMATIVE):** If the relation does not exist, create it along with its reified entity (if that entity does not already exist). If the relation already exists with the same ID, the op is ignored (relations are immutable except for position). To add values to the relation, use UpdateEntity on the reified entity ID.
+**Semantics (NORMATIVE):** If the relation does not exist, create it along with its reified entity (if that entity does not already exist). If the relation already exists with the same ID, the op is ignored (relations are immutable except for position, space hints, and version pins). To add values to the relation, use UpdateEntity on the reified entity ID.
 
 **UpdateRelation:**
 ```
 UpdateRelation {
   id: ID | index
-  position: string
+  from_space: ID?          // Optional space hint for source
+  from_version: ID?        // Optional version (edit ID) to pin source
+  to_space: ID?            // Optional space hint for target
+  to_version: ID?          // Optional version (edit ID) to pin target
+  position: string?
 }
 ```
 
-Updates the relation's position for ordering. All other fields are immutable.
+Updates the relation's mutable fields. The structural fields (`entity`, `type`, `from`, `to`) remain immutable.
 
 **DeleteRelation:**
 ```
@@ -603,24 +611,21 @@ The same object ID can exist in multiple spaces with different data. Consumers c
 
 ### 5.2 Cross-Space References
 
-Object IDs are globally unique. Relations can optionally include space hints for their endpoints:
+Object IDs are globally unique. Relations can optionally include space and version hints for their endpoints:
 
 ```
 Relation {
   ...
-  from_space: ID?    // Optional provenance hint for source
-  to_space: ID?      // Optional provenance hint for target
+  from_space: ID?      // Optional provenance hint for source
+  from_version: ID?    // Optional version (edit ID) to pin source
+  to_space: ID?        // Optional provenance hint for target
+  to_version: ID?      // Optional version (edit ID) to pin target
 }
 ```
 
 Space hints are provenance metadata for performance, not hard requirements. Resolvers MAY use hints to prefer a specific space when resolving the target.
 
-**Version pinning:** Use values on the relation's entity for immutable citations:
-
-```
-// On the relation's reified entity:
-{ property: version_property_id, value: <edit_id> }
-```
+**Version pinning:** The `from_version` and `to_version` fields allow pinning relation endpoints to a specific version (edit ID). This enables immutable citations where the relation always refers to the entity as it existed at that specific edit, rather than the current resolved state. Version pins are mutable via UpdateRelation.
 
 ---
 
@@ -768,17 +773,32 @@ to: ObjectRef
 flags: uint8
   bit 0 = has_position
   bit 1 = has_from_space
-  bit 2 = has_to_space
-  bits 3-7 = reserved (must be 0)
+  bit 2 = has_from_version
+  bit 3 = has_to_space
+  bit 4 = has_to_version
+  bits 5-7 = reserved (must be 0)
 [if has_position]: position: String
 [if has_from_space]: from_space: ID
+[if has_from_version]: from_version: ID
 [if has_to_space]: to_space: ID
+[if has_to_version]: to_version: ID
 ```
 
 **UpdateRelation:**
 ```
 id: ObjectRef
-position: String
+flags: uint8
+  bit 0 = has_position
+  bit 1 = has_from_space
+  bit 2 = has_from_version
+  bit 3 = has_to_space
+  bit 4 = has_to_version
+  bits 5-7 = reserved (must be 0)
+[if has_position]: position: String
+[if has_from_space]: from_space: ID
+[if has_from_version]: from_version: ID
+[if has_to_space]: to_space: ID
+[if has_to_version]: to_version: ID
 ```
 
 **DeleteRelation:**

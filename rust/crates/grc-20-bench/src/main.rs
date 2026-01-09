@@ -1,5 +1,6 @@
 //! Benchmark for GRC-20 serialization using country data.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -246,7 +247,7 @@ fn get_language_id(lang_code: &str) -> Option<[u8; 16]> {
 }
 
 struct ConversionContext {
-    ops: Vec<Op>,
+    ops: Vec<Op<'static>>,
     created_regions: HashSet<u32>,
     created_subregions: HashSet<u32>,
     created_timezones: HashSet<String>,
@@ -272,7 +273,7 @@ impl ConversionContext {
                 values: vec![PropertyValue {
                     property: props::NAME,
                     value: Value::Text {
-                        value: region_name.to_string(),
+                        value: Cow::Owned(region_name.to_string()),
                         language: None,
                     },
                 }],
@@ -288,7 +289,9 @@ impl ConversionContext {
                 entity: rel_entity_id,
                 position: None,
                 from_space: None,
+                from_version: None,
                 to_space: None,
+                to_version: None,
             }));
         }
     }
@@ -303,7 +306,7 @@ impl ConversionContext {
                 values: vec![PropertyValue {
                     property: props::NAME,
                     value: Value::Text {
-                        value: subregion_name.to_string(),
+                        value: Cow::Owned(subregion_name.to_string()),
                         language: None,
                     },
                 }],
@@ -319,7 +322,9 @@ impl ConversionContext {
                 entity: rel_entity_id,
                 position: None,
                 from_space: None,
+                from_version: None,
                 to_space: None,
+                to_version: None,
             }));
 
             // Create IN_REGION relation if region is known
@@ -334,7 +339,9 @@ impl ConversionContext {
                     entity: rel_entity_id,
                     position: None,
                     from_space: None,
+                    from_version: None,
                     to_space: None,
+                    to_version: None,
                 }));
             }
         }
@@ -351,7 +358,7 @@ impl ConversionContext {
                     PropertyValue {
                         property: props::ZONE_NAME,
                         value: Value::Text {
-                            value: tz.zone_name.clone(),
+                            value: Cow::Owned(tz.zone_name.clone()),
                             language: None,
                         },
                     },
@@ -362,21 +369,21 @@ impl ConversionContext {
                     PropertyValue {
                         property: props::GMT_OFFSET_NAME,
                         value: Value::Text {
-                            value: tz.gmt_offset_name.clone(),
+                            value: Cow::Owned(tz.gmt_offset_name.clone()),
                             language: None,
                         },
                     },
                     PropertyValue {
                         property: props::ABBREVIATION,
                         value: Value::Text {
-                            value: tz.abbreviation.clone(),
+                            value: Cow::Owned(tz.abbreviation.clone()),
                             language: None,
                         },
                     },
                     PropertyValue {
                         property: props::TZ_NAME,
                         value: Value::Text {
-                            value: tz.tz_name.clone(),
+                            value: Cow::Owned(tz.tz_name.clone()),
                             language: None,
                         },
                     },
@@ -393,7 +400,9 @@ impl ConversionContext {
                 entity: rel_entity_id,
                 position: None,
                 from_space: None,
+                from_version: None,
                 to_space: None,
+                to_version: None,
             }));
         }
     }
@@ -406,7 +415,7 @@ impl ConversionContext {
         values.push(PropertyValue {
             property: props::NAME,
             value: Value::Text {
-                value: country.name.clone(),
+                value: Cow::Owned(country.name.clone()),
                 language: None,
             },
         });
@@ -414,7 +423,7 @@ impl ConversionContext {
         values.push(PropertyValue {
             property: props::ISO3,
             value: Value::Text {
-                value: country.iso3.clone(),
+                value: Cow::Owned(country.iso3.clone()),
                 language: None,
             },
         });
@@ -422,7 +431,7 @@ impl ConversionContext {
         values.push(PropertyValue {
             property: props::ISO2,
             value: Value::Text {
-                value: country.iso2.clone(),
+                value: Cow::Owned(country.iso2.clone()),
                 language: None,
             },
         });
@@ -431,98 +440,98 @@ impl ConversionContext {
         if let Some(ref v) = country.numeric_code {
             values.push(PropertyValue {
                 property: props::NUMERIC_CODE,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.phonecode {
             values.push(PropertyValue {
                 property: props::PHONE_CODE,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.capital {
             values.push(PropertyValue {
                 property: props::CAPITAL,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.currency {
             values.push(PropertyValue {
                 property: props::CURRENCY_CODE,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.currency_name {
             values.push(PropertyValue {
                 property: props::CURRENCY_NAME,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.currency_symbol {
             values.push(PropertyValue {
                 property: props::CURRENCY_SYMBOL,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.tld {
             values.push(PropertyValue {
                 property: props::TLD,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.native {
             values.push(PropertyValue {
                 property: props::NATIVE_NAME,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.nationality {
             values.push(PropertyValue {
                 property: props::NATIONALITY,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.postal_code_format {
             values.push(PropertyValue {
                 property: props::POSTAL_CODE_FORMAT,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.postal_code_regex {
             values.push(PropertyValue {
                 property: props::POSTAL_CODE_REGEX,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.emoji {
             values.push(PropertyValue {
                 property: props::EMOJI,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.emoji_unicode {
             values.push(PropertyValue {
                 property: props::EMOJI_UNICODE,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
         if let Some(ref v) = country.wikidata_id {
             values.push(PropertyValue {
                 property: props::WIKIDATA_ID,
-                value: Value::Text { value: v.clone(), language: None },
+                value: Value::Text { value: Cow::Owned(v.clone()), language: None },
             });
         }
 
@@ -565,7 +574,7 @@ impl ConversionContext {
                     values.push(PropertyValue {
                         property: props::NAME,
                         value: Value::Text {
-                            value: translation.clone(),
+                            value: Cow::Owned(translation.clone()),
                             language: Some(lang_id),
                         },
                     });
@@ -589,7 +598,9 @@ impl ConversionContext {
             entity: rel_entity_id,
             position: None,
             from_space: None,
+            from_version: None,
             to_space: None,
+            to_version: None,
         }));
 
         // Create region/subregion entities and relations
@@ -607,7 +618,9 @@ impl ConversionContext {
                 entity: rel_entity_id,
                 position: None,
                 from_space: None,
+                from_version: None,
                 to_space: None,
+                to_version: None,
             }));
         }
 
@@ -625,7 +638,9 @@ impl ConversionContext {
                 entity: rel_entity_id,
                 position: None,
                 from_space: None,
+                from_version: None,
                 to_space: None,
+                to_version: None,
             }));
         }
 
@@ -644,14 +659,16 @@ impl ConversionContext {
                     entity: rel_entity_id,
                     position: None,
                     from_space: None,
+                    from_version: None,
                     to_space: None,
+                    to_version: None,
                 }));
             }
         }
     }
 }
 
-fn create_schema_ops() -> Vec<Op> {
+fn create_schema_ops() -> Vec<Op<'static>> {
     vec![
         // Country properties
         Op::CreateProperty(CreateProperty { id: props::NAME, data_type: DataType::Text }),
@@ -686,28 +703,28 @@ fn create_schema_ops() -> Vec<Op> {
             id: types::COUNTRY,
             values: vec![PropertyValue {
                 property: props::NAME,
-                value: Value::Text { value: "Country".to_string(), language: None },
+                value: Value::Text { value: Cow::Borrowed("Country"), language: None },
             }],
         }),
         Op::CreateEntity(CreateEntity {
             id: types::REGION,
             values: vec![PropertyValue {
                 property: props::NAME,
-                value: Value::Text { value: "Region".to_string(), language: None },
+                value: Value::Text { value: Cow::Borrowed("Region"), language: None },
             }],
         }),
         Op::CreateEntity(CreateEntity {
             id: types::SUBREGION,
             values: vec![PropertyValue {
                 property: props::NAME,
-                value: Value::Text { value: "Subregion".to_string(), language: None },
+                value: Value::Text { value: Cow::Borrowed("Subregion"), language: None },
             }],
         }),
         Op::CreateEntity(CreateEntity {
             id: types::TIMEZONE,
             values: vec![PropertyValue {
                 property: props::NAME,
-                value: Value::Text { value: "Timezone".to_string(), language: None },
+                value: Value::Text { value: Cow::Borrowed("Timezone"), language: None },
             }],
         }),
     ]
@@ -771,7 +788,7 @@ fn main() {
     // Create edit
     let edit = Edit {
         id: make_entity_id(0xFF, 1),
-        name: "Countries Import".to_string(),
+        name: Cow::Borrowed("Countries Import"),
         authors: vec![make_entity_id(0xAA, 1)],
         created_at: 1704067200_000_000,
         ops: ctx.ops,
@@ -832,7 +849,7 @@ fn main() {
     );
     assert_eq!(decoded.ops.len(), edit.ops.len());
 
-    // Benchmark decoding (compressed) - multiple iterations
+    // Benchmark decoding (compressed, allocating) - multiple iterations
     // Warmup
     for _ in 0..10 {
         let _ = grc_20::decode_edit(&compressed).expect("Failed to decode compressed");
@@ -845,12 +862,36 @@ fn main() {
     let decode_compressed_time = decode_compressed_start.elapsed() / DECODE_ITERS;
     let decoded_compressed = decoded_compressed.unwrap();
 
-    println!("\nDecode (compressed): {:?} (avg of {} iterations)", decode_compressed_time, DECODE_ITERS);
+    println!("\nDecode (compressed, allocating): {:?} (avg of {} iterations)", decode_compressed_time, DECODE_ITERS);
     println!(
         "  Throughput: {:.2} MB/s (uncompressed equivalent)",
         (encoded.len() as f64 / 1_000_000.0) / decode_compressed_time.as_secs_f64()
     );
     assert_eq!(decoded_compressed.ops.len(), edit.ops.len());
+
+    // Benchmark decoding (compressed, zero-copy) - two-step API
+    // Warmup
+    for _ in 0..10 {
+        let decompressed = grc_20::decompress(&compressed).expect("Failed to decompress");
+        let _ = grc_20::decode_edit(&decompressed).expect("Failed to decode");
+    }
+    let decode_zc_start = Instant::now();
+    for _ in 0..DECODE_ITERS {
+        let decompressed = grc_20::decompress(&compressed).expect("Failed to decompress");
+        let decoded = grc_20::decode_edit(&decompressed).expect("Failed to decode");
+        assert_eq!(decoded.ops.len(), edit.ops.len());
+    }
+    let decode_zc_time = decode_zc_start.elapsed() / DECODE_ITERS;
+
+    println!("\nDecode (compressed, zero-copy): {:?} (avg of {} iterations)", decode_zc_time, DECODE_ITERS);
+    println!(
+        "  Throughput: {:.2} MB/s (uncompressed equivalent)",
+        (encoded.len() as f64 / 1_000_000.0) / decode_zc_time.as_secs_f64()
+    );
+    println!(
+        "  Speedup vs allocating: {:.1}%",
+        100.0 * (decode_compressed_time.as_secs_f64() - decode_zc_time.as_secs_f64()) / decode_compressed_time.as_secs_f64()
+    );
 
     // Write output files
     let input_path = Path::new(&data_path);

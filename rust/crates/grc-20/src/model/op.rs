@@ -2,21 +2,23 @@
 //!
 //! All state changes in GRC-20 are expressed as operations (ops).
 
+use std::borrow::Cow;
+
 use crate::model::{DataType, Id, PropertyValue};
 
 /// An atomic operation that modifies graph state (spec Section 3.1).
 #[derive(Debug, Clone, PartialEq)]
-pub enum Op {
-    CreateEntity(CreateEntity),
-    UpdateEntity(UpdateEntity),
+pub enum Op<'a> {
+    CreateEntity(CreateEntity<'a>),
+    UpdateEntity(UpdateEntity<'a>),
     DeleteEntity(DeleteEntity),
-    CreateRelation(CreateRelation),
-    UpdateRelation(UpdateRelation),
+    CreateRelation(CreateRelation<'a>),
+    UpdateRelation(UpdateRelation<'a>),
     DeleteRelation(DeleteRelation),
     CreateProperty(CreateProperty),
 }
 
-impl Op {
+impl Op<'_> {
     /// Returns the op type code for wire encoding.
     pub fn op_type(&self) -> u8 {
         match self {
@@ -36,11 +38,11 @@ impl Op {
 /// If the entity does not exist, creates it. If it already exists,
 /// this acts as an update: values are applied as set_properties (LWW).
 #[derive(Debug, Clone, PartialEq)]
-pub struct CreateEntity {
+pub struct CreateEntity<'a> {
     /// The entity's unique identifier.
     pub id: Id,
     /// Initial values for the entity.
-    pub values: Vec<PropertyValue>,
+    pub values: Vec<PropertyValue<'a>>,
 }
 
 /// Updates an existing entity (spec Section 3.2).
@@ -52,15 +54,15 @@ pub struct CreateEntity {
 /// 4. remove_values_by_hash
 /// 5. add_values
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct UpdateEntity {
+pub struct UpdateEntity<'a> {
     /// The entity to update.
     pub id: Id,
     /// Replace entire value set for these properties (LWW).
-    pub set_properties: Vec<PropertyValue>,
+    pub set_properties: Vec<PropertyValue<'a>>,
     /// Add values (set union).
-    pub add_values: Vec<PropertyValue>,
+    pub add_values: Vec<PropertyValue<'a>>,
     /// Remove values by content match.
-    pub remove_values: Vec<PropertyValue>,
+    pub remove_values: Vec<PropertyValue<'a>>,
     /// Remove values by their value_id hash.
     pub remove_values_by_hash: Vec<Id>,
     /// Clear all values for these properties.
@@ -68,12 +70,16 @@ pub struct UpdateEntity {
 }
 
 
-impl UpdateEntity {
+impl<'a> UpdateEntity<'a> {
     /// Creates a new UpdateEntity for the given entity ID.
     pub fn new(id: Id) -> Self {
         Self {
             id,
-            ..Default::default()
+            set_properties: Vec::new(),
+            add_values: Vec::new(),
+            remove_values: Vec::new(),
+            remove_values_by_hash: Vec::new(),
+            unset_properties: Vec::new(),
         }
     }
 
@@ -86,6 +92,7 @@ impl UpdateEntity {
             && self.unset_properties.is_empty()
     }
 }
+
 
 /// Deletes an entity (spec Section 3.2).
 ///
@@ -109,7 +116,7 @@ pub enum RelationIdMode {
 ///
 /// Also implicitly creates the reified entity if it doesn't exist.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CreateRelation {
+pub struct CreateRelation<'a> {
     /// The relation ID mode.
     pub id_mode: RelationIdMode,
     /// The relation type entity ID.
@@ -121,14 +128,18 @@ pub struct CreateRelation {
     /// The reified entity ID for this relation.
     pub entity: Id,
     /// Optional ordering position (fractional indexing).
-    pub position: Option<String>,
+    pub position: Option<Cow<'a, str>>,
     /// Optional space hint for source entity.
     pub from_space: Option<Id>,
+    /// Optional version (edit ID) to pin source entity.
+    pub from_version: Option<Id>,
     /// Optional space hint for target entity.
     pub to_space: Option<Id>,
+    /// Optional version (edit ID) to pin target entity.
+    pub to_version: Option<Id>,
 }
 
-impl CreateRelation {
+impl CreateRelation<'_> {
     /// Computes the actual relation ID.
     ///
     /// For instance mode, returns the provided ID.
@@ -142,15 +153,23 @@ impl CreateRelation {
     }
 }
 
-/// Updates a relation's position (spec Section 3.3).
+/// Updates a relation's mutable fields (spec Section 3.3).
 ///
-/// Only the position field can be updated; all other fields are immutable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UpdateRelation {
+/// The structural fields (entity, type, from, to) remain immutable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateRelation<'a> {
     /// The relation to update.
     pub id: Id,
-    /// New position for ordering.
-    pub position: String,
+    /// Optional new position for ordering.
+    pub position: Option<Cow<'a, str>>,
+    /// Optional space hint for source entity.
+    pub from_space: Option<Id>,
+    /// Optional version (edit ID) to pin source entity.
+    pub from_version: Option<Id>,
+    /// Optional space hint for target entity.
+    pub to_space: Option<Id>,
+    /// Optional version (edit ID) to pin target entity.
+    pub to_version: Option<Id>,
 }
 
 /// Deletes a relation (spec Section 3.3).
@@ -261,7 +280,9 @@ mod tests {
             entity,
             position: None,
             from_space: None,
+            from_version: None,
             to_space: None,
+            to_version: None,
         };
         assert_eq!(rel_instance.relation_id(), instance_id);
 
@@ -274,7 +295,9 @@ mod tests {
             entity,
             position: None,
             from_space: None,
+            from_version: None,
             to_space: None,
+            to_version: None,
         };
         assert_eq!(rel_unique.relation_id(), unique_relation_id(&from, &to, &rel_type));
     }

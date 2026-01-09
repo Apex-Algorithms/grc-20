@@ -13,6 +13,7 @@
 //! # Quick Start
 //!
 //! ```rust
+//! use std::borrow::Cow;
 //! use grc_20::{Edit, Op, CreateEntity, PropertyValue, Value, DataType};
 //! use grc_20::codec::{encode_edit, decode_edit};
 //! use grc_20::genesis::properties;
@@ -20,7 +21,7 @@
 //! // Create an edit with an entity
 //! let edit = Edit {
 //!     id: [1u8; 16],
-//!     name: "My Edit".to_string(),
+//!     name: Cow::Owned("My Edit".to_string()),
 //!     authors: vec![[2u8; 16]],
 //!     created_at: 1234567890,
 //!     ops: vec![
@@ -29,7 +30,7 @@
 //!             values: vec![PropertyValue {
 //!                 property: properties::name(),
 //!                 value: Value::Text {
-//!                     value: "Alice".to_string(),
+//!                     value: Cow::Owned("Alice".to_string()),
 //!                     language: None,
 //!                 },
 //!             }],
@@ -40,7 +41,7 @@
 //! // Encode to binary
 //! let bytes = encode_edit(&edit).unwrap();
 //!
-//! // Decode back
+//! // Decode back (zero-copy for uncompressed data)
 //! let decoded = decode_edit(&bytes).unwrap();
 //! assert_eq!(edit.id, decoded.id);
 //! ```
@@ -77,7 +78,7 @@ pub mod model;
 pub mod validate;
 
 // Re-export commonly used types at crate root
-pub use codec::{decode_edit, encode_edit, encode_edit_compressed, encode_edit_profiled};
+pub use codec::{decode_edit, decompress, encode_edit, encode_edit_compressed, encode_edit_profiled};
 pub use error::{DecodeError, EncodeError, ValidationError};
 pub use model::{
     CreateEntity, CreateProperty, CreateRelation, DataType, DecimalMantissa, DeleteEntity,

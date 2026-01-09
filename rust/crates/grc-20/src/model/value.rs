@@ -2,6 +2,8 @@
 //!
 //! Values are typed attribute instances on entities and relations.
 
+use std::borrow::Cow;
+
 use crate::model::Id;
 
 /// Data types for property values (spec Section 2.4).
@@ -78,14 +80,14 @@ impl EmbeddingSubType {
 ///
 /// Most decimals fit in i64; larger values use big-endian two's complement bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum DecimalMantissa {
+pub enum DecimalMantissa<'a> {
     /// Mantissa fits in signed 64-bit integer.
     I64(i64),
     /// Arbitrary precision: big-endian two's complement, minimal-length.
-    Big(Vec<u8>),
+    Big(Cow<'a, [u8]>),
 }
 
-impl DecimalMantissa {
+impl DecimalMantissa<'_> {
     /// Returns whether this mantissa has trailing zeros (not normalized).
     pub fn has_trailing_zeros(&self) -> bool {
         match self {
@@ -109,7 +111,7 @@ impl DecimalMantissa {
 
 /// A typed value that can be stored on an entity or relation.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Value {
+pub enum Value<'a> {
     /// Boolean value.
     Bool(bool),
 
@@ -122,24 +124,24 @@ pub enum Value {
     /// Arbitrary-precision decimal: value = mantissa * 10^exponent.
     Decimal {
         exponent: i32,
-        mantissa: DecimalMantissa,
+        mantissa: DecimalMantissa<'a>,
     },
 
     /// UTF-8 text with optional language.
     Text {
-        value: String,
+        value: Cow<'a, str>,
         /// Language entity ID, or None for default language.
         language: Option<Id>,
     },
 
     /// Opaque byte array.
-    Bytes(Vec<u8>),
+    Bytes(Cow<'a, [u8]>),
 
     /// Microseconds since Unix epoch.
     Timestamp(i64),
 
     /// ISO 8601 date string (variable precision).
-    Date(String),
+    Date(Cow<'a, str>),
 
     /// WGS84 geographic coordinate.
     Point {
@@ -154,14 +156,14 @@ pub enum Value {
         sub_type: EmbeddingSubType,
         dims: usize,
         /// Raw bytes in the format specified by sub_type.
-        data: Vec<u8>,
+        data: Cow<'a, [u8]>,
     },
 
     /// Non-traversable object reference.
     Ref(Id),
 }
 
-impl Value {
+impl Value<'_> {
     /// Returns the data type of this value.
     pub fn data_type(&self) -> DataType {
         match self {
@@ -237,11 +239,11 @@ impl Value {
 
 /// A property-value pair that can be attached to an object.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PropertyValue {
+pub struct PropertyValue<'a> {
     /// The property ID this value is for.
     pub property: Id,
     /// The value.
-    pub value: Value,
+    pub value: Value<'a>,
 }
 
 /// A property definition in the schema.

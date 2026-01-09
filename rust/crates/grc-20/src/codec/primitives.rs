@@ -112,7 +112,7 @@ impl<'a> Reader<'a> {
         Ok(zigzag_decode(unsigned))
     }
 
-    /// Reads a length-prefixed UTF-8 string.
+    /// Reads a length-prefixed UTF-8 string (allocates).
     #[inline]
     pub fn read_string(
         &mut self,
@@ -132,6 +132,25 @@ impl<'a> Reader<'a> {
         std::str::from_utf8(bytes)
             .map(|s| s.to_string())
             .map_err(|_| DecodeError::InvalidUtf8 { field })
+    }
+
+    /// Reads a length-prefixed UTF-8 string as a borrowed slice (zero-copy).
+    #[inline]
+    pub fn read_str(
+        &mut self,
+        max_len: usize,
+        field: &'static str,
+    ) -> Result<&'a str, DecodeError> {
+        let len = self.read_varint(field)? as usize;
+        if len > max_len {
+            return Err(DecodeError::LengthExceedsLimit {
+                field,
+                len,
+                max: max_len,
+            });
+        }
+        let bytes = self.read_bytes(len, field)?;
+        std::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidUtf8 { field })
     }
 
     /// Reads a length-prefixed byte array.

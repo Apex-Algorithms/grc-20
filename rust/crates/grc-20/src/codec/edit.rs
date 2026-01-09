@@ -20,16 +20,52 @@ use crate::model::{DataType, DictionaryBuilder, Edit, Id, Op, WireDictionaries};
 // DECODING
 // =============================================================================
 
-/// Decodes an Edit from binary data.
+/// Decompresses a GRC2Z compressed edit, returning the uncompressed bytes.
 ///
-/// Automatically detects and handles zstd compression (GRC2Z magic).
-pub fn decode_edit(input: &[u8]) -> Result<Edit, DecodeError> {
+/// Use this with [`decode_edit`] for zero-copy decoding of compressed data:
+///
+/// ```ignore
+/// let uncompressed = decompress(&compressed_bytes)?;
+/// let edit = decode_edit(&uncompressed)?;  // zero-copy, borrows from uncompressed
+/// // edit is valid while uncompressed is alive
+/// ```
+pub fn decompress(input: &[u8]) -> Result<Vec<u8>, DecodeError> {
+    if input.len() < 5 {
+        return Err(DecodeError::UnexpectedEof { context: "magic" });
+    }
+    if &input[0..5] != MAGIC_COMPRESSED {
+        let mut found = [0u8; 4];
+        found.copy_from_slice(&input[0..4]);
+        return Err(DecodeError::InvalidMagic { found });
+    }
+    decompress_zstd(&input[5..])
+}
+
+/// Decodes an Edit from binary data with zero-copy borrowing.
+///
+/// Handles both compressed (GRC2Z) and uncompressed (GRC2) formats.
+/// For true zero-copy with compressed data, use [`decompress`] first:
+///
+/// ```ignore
+/// // Zero-copy for compressed data:
+/// let uncompressed = decompress(&compressed)?;
+/// let edit = decode_edit(&uncompressed)?;
+///
+/// // Zero-copy for uncompressed data:
+/// let edit = decode_edit(&uncompressed_bytes)?;
+/// ```
+///
+/// If you pass compressed data directly, it will decompress internally
+/// and allocate owned strings (no zero-copy benefit).
+pub fn decode_edit(input: &[u8]) -> Result<Edit<'_>, DecodeError> {
     if input.len() < 4 {
         return Err(DecodeError::UnexpectedEof { context: "magic" });
     }
 
     // Detect compression
-    let data: Cow<[u8]> = if input.len() >= 5 && &input[0..5] == MAGIC_COMPRESSED {
+    if input.len() >= 5 && &input[0..5] == MAGIC_COMPRESSED {
+        // Compressed: decompress and decode with allocations
+        // (for zero-copy, caller should use decompress() first)
         let decompressed = decompress_zstd(&input[5..])?;
         if decompressed.len() > MAX_EDIT_SIZE {
             return Err(DecodeError::LengthExceedsLimit {
@@ -38,8 +74,9 @@ pub fn decode_edit(input: &[u8]) -> Result<Edit, DecodeError> {
                 max: MAX_EDIT_SIZE,
             });
         }
-        Cow::Owned(decompressed)
+        decode_edit_owned(&decompressed)
     } else if &input[0..4] == MAGIC_UNCOMPRESSED {
+        // Uncompressed: decode with zero-copy borrowing
         if input.len() > MAX_EDIT_SIZE {
             return Err(DecodeError::LengthExceedsLimit {
                 field: "edit",
@@ -47,14 +84,17 @@ pub fn decode_edit(input: &[u8]) -> Result<Edit, DecodeError> {
                 max: MAX_EDIT_SIZE,
             });
         }
-        Cow::Borrowed(input)
+        decode_edit_borrowed(input)
     } else {
         let mut found = [0u8; 4];
         found.copy_from_slice(&input[0..4]);
-        return Err(DecodeError::InvalidMagic { found });
-    };
+        Err(DecodeError::InvalidMagic { found })
+    }
+}
 
-    let mut reader = Reader::new(&data);
+/// Decodes an Edit with zero-copy borrowing from the input.
+fn decode_edit_borrowed(input: &[u8]) -> Result<Edit<'_>, DecodeError> {
+    let mut reader = Reader::new(input);
 
     // Skip magic (already validated)
     reader.read_bytes(4, "magic")?;
@@ -67,7 +107,7 @@ pub fn decode_edit(input: &[u8]) -> Result<Edit, DecodeError> {
 
     // Header
     let edit_id = reader.read_id("edit_id")?;
-    let name = reader.read_string(MAX_STRING_LEN, "name")?;
+    let name = Cow::Borrowed(reader.read_str(MAX_STRING_LEN, "name")?);
     let authors = reader.read_id_vec(MAX_AUTHORS, "authors")?;
     let created_at = reader.read_signed_varint("created_at")?;
 
@@ -122,6 +162,165 @@ pub fn decode_edit(input: &[u8]) -> Result<Edit, DecodeError> {
         created_at,
         ops,
     })
+}
+
+/// Decodes an Edit with allocations (for decompressed data).
+fn decode_edit_owned(data: &[u8]) -> Result<Edit<'static>, DecodeError> {
+    let mut reader = Reader::new(data);
+
+    // Skip magic (already validated in decompress)
+    reader.read_bytes(4, "magic")?;
+
+    // Version
+    let version = reader.read_byte("version")?;
+    if version != FORMAT_VERSION {
+        return Err(DecodeError::UnsupportedVersion { version });
+    }
+
+    // Header - use allocating reads
+    let edit_id = reader.read_id("edit_id")?;
+    let name = Cow::Owned(reader.read_string(MAX_STRING_LEN, "name")?);
+    let authors = reader.read_id_vec(MAX_AUTHORS, "authors")?;
+    let created_at = reader.read_signed_varint("created_at")?;
+
+    // Schema dictionaries
+    let property_count = reader.read_varint("property_count")? as usize;
+    if property_count > MAX_DICT_SIZE {
+        return Err(DecodeError::LengthExceedsLimit {
+            field: "properties",
+            len: property_count,
+            max: MAX_DICT_SIZE,
+        });
+    }
+    let mut properties = Vec::with_capacity(property_count);
+    for _ in 0..property_count {
+        let id = reader.read_id("property_id")?;
+        let dt_byte = reader.read_byte("data_type")?;
+        let data_type = DataType::from_u8(dt_byte)
+            .ok_or(DecodeError::InvalidDataType { data_type: dt_byte })?;
+        properties.push((id, data_type));
+    }
+
+    let relation_types = reader.read_id_vec(MAX_DICT_SIZE, "relation_types")?;
+    let languages = reader.read_id_vec(MAX_DICT_SIZE, "languages")?;
+    let objects = reader.read_id_vec(MAX_DICT_SIZE, "objects")?;
+
+    let dicts = WireDictionaries {
+        properties,
+        relation_types,
+        languages,
+        objects,
+    };
+
+    // Operations - use allocating decode
+    let op_count = reader.read_varint("op_count")? as usize;
+    if op_count > MAX_OPS_PER_EDIT {
+        return Err(DecodeError::LengthExceedsLimit {
+            field: "ops",
+            len: op_count,
+            max: MAX_OPS_PER_EDIT,
+        });
+    }
+
+    let mut ops = Vec::with_capacity(op_count);
+    for _ in 0..op_count {
+        ops.push(decode_op_owned(&mut reader, &dicts)?);
+    }
+
+    Ok(Edit {
+        id: edit_id,
+        name,
+        authors,
+        created_at,
+        ops,
+    })
+}
+
+/// Decodes an Op with allocations (for decompressed data).
+fn decode_op_owned(reader: &mut Reader<'_>, dicts: &WireDictionaries) -> Result<Op<'static>, DecodeError> {
+    // Decode normally, then convert to owned
+    let op = decode_op(reader, dicts)?;
+    Ok(op_to_owned(op))
+}
+
+/// Converts an Op with borrowed data to owned data.
+fn op_to_owned(op: Op<'_>) -> Op<'static> {
+    match op {
+        Op::CreateEntity(ce) => Op::CreateEntity(crate::model::CreateEntity {
+            id: ce.id,
+            values: ce.values.into_iter().map(pv_to_owned).collect(),
+        }),
+        Op::UpdateEntity(ue) => Op::UpdateEntity(crate::model::UpdateEntity {
+            id: ue.id,
+            set_properties: ue.set_properties.into_iter().map(pv_to_owned).collect(),
+            add_values: ue.add_values.into_iter().map(pv_to_owned).collect(),
+            remove_values: ue.remove_values.into_iter().map(pv_to_owned).collect(),
+            remove_values_by_hash: ue.remove_values_by_hash,
+            unset_properties: ue.unset_properties,
+        }),
+        Op::DeleteEntity(de) => Op::DeleteEntity(de),
+        Op::CreateRelation(cr) => Op::CreateRelation(crate::model::CreateRelation {
+            id_mode: cr.id_mode,
+            relation_type: cr.relation_type,
+            from: cr.from,
+            to: cr.to,
+            entity: cr.entity,
+            position: cr.position.map(|p| Cow::Owned(p.into_owned())),
+            from_space: cr.from_space,
+            from_version: cr.from_version,
+            to_space: cr.to_space,
+            to_version: cr.to_version,
+        }),
+        Op::UpdateRelation(ur) => Op::UpdateRelation(crate::model::UpdateRelation {
+            id: ur.id,
+            position: ur.position.map(|p| Cow::Owned(p.into_owned())),
+            from_space: ur.from_space,
+            from_version: ur.from_version,
+            to_space: ur.to_space,
+            to_version: ur.to_version,
+        }),
+        Op::DeleteRelation(dr) => Op::DeleteRelation(dr),
+        Op::CreateProperty(cp) => Op::CreateProperty(cp),
+    }
+}
+
+/// Converts a PropertyValue with borrowed data to owned data.
+fn pv_to_owned(pv: crate::model::PropertyValue<'_>) -> crate::model::PropertyValue<'static> {
+    crate::model::PropertyValue {
+        property: pv.property,
+        value: value_to_owned(pv.value),
+    }
+}
+
+/// Converts a Value with borrowed data to owned data.
+fn value_to_owned(v: crate::model::Value<'_>) -> crate::model::Value<'static> {
+    use crate::model::{DecimalMantissa, Value};
+    match v {
+        Value::Bool(b) => Value::Bool(b),
+        Value::Int64(i) => Value::Int64(i),
+        Value::Float64(f) => Value::Float64(f),
+        Value::Decimal { exponent, mantissa } => Value::Decimal {
+            exponent,
+            mantissa: match mantissa {
+                DecimalMantissa::I64(i) => DecimalMantissa::I64(i),
+                DecimalMantissa::Big(b) => DecimalMantissa::Big(Cow::Owned(b.into_owned())),
+            },
+        },
+        Value::Text { value, language } => Value::Text {
+            value: Cow::Owned(value.into_owned()),
+            language,
+        },
+        Value::Bytes(b) => Value::Bytes(Cow::Owned(b.into_owned())),
+        Value::Timestamp(t) => Value::Timestamp(t),
+        Value::Date(d) => Value::Date(Cow::Owned(d.into_owned())),
+        Value::Point { lat, lon } => Value::Point { lat, lon },
+        Value::Embedding { sub_type, dims, data } => Value::Embedding {
+            sub_type,
+            dims,
+            data: Cow::Owned(data.into_owned()),
+        },
+        Value::Ref(r) => Value::Ref(r),
+    }
 }
 
 fn decompress_zstd(compressed: &[u8]) -> Result<Vec<u8>, DecodeError> {
@@ -281,10 +480,10 @@ mod tests {
     use super::*;
     use crate::model::{CreateEntity, CreateProperty, PropertyValue, Value};
 
-    fn make_test_edit() -> Edit {
+    fn make_test_edit() -> Edit<'static> {
         Edit {
             id: [1u8; 16],
-            name: "Test Edit".to_string(),
+            name: Cow::Owned("Test Edit".to_string()),
             authors: vec![[2u8; 16]],
             created_at: 1234567890,
             ops: vec![
@@ -297,7 +496,7 @@ mod tests {
                     values: vec![PropertyValue {
                         property: [10u8; 16],
                         value: Value::Text {
-                            value: "Hello".to_string(),
+                            value: Cow::Owned("Hello".to_string()),
                             language: None,
                         },
                     }],
@@ -366,9 +565,9 @@ mod tests {
 
     #[test]
     fn test_empty_edit() {
-        let edit = Edit {
+        let edit: Edit<'static> = Edit {
             id: [0u8; 16],
-            name: String::new(),
+            name: Cow::Borrowed(""),
             authors: vec![],
             created_at: 0,
             ops: vec![],

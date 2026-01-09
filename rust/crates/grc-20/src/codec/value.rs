@@ -2,6 +2,8 @@
 //!
 //! Implements the wire format for property values (spec Section 6.5).
 
+use std::borrow::Cow;
+
 use crate::codec::primitives::{Reader, Writer};
 use crate::error::{DecodeError, EncodeError};
 use crate::limits::{MAX_BYTES_LEN, MAX_EMBEDDING_BYTES, MAX_EMBEDDING_DIMS, MAX_POSITION_LEN, MAX_STRING_LEN};
@@ -14,12 +16,12 @@ use crate::model::{
 // DECODING
 // =============================================================================
 
-/// Decodes a Value from the reader based on the data type.
-pub fn decode_value(
-    reader: &mut Reader,
+/// Decodes a Value from the reader based on the data type (zero-copy).
+pub fn decode_value<'a>(
+    reader: &mut Reader<'a>,
     data_type: DataType,
     dicts: &WireDictionaries,
-) -> Result<Value, DecodeError> {
+) -> Result<Value<'a>, DecodeError> {
     match data_type {
         DataType::Bool => decode_bool(reader),
         DataType::Int64 => decode_int64(reader),
@@ -35,7 +37,7 @@ pub fn decode_value(
     }
 }
 
-fn decode_bool(reader: &mut Reader) -> Result<Value, DecodeError> {
+fn decode_bool<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
     let byte = reader.read_byte("bool")?;
     match byte {
         0x00 => Ok(Value::Bool(false)),
@@ -44,17 +46,17 @@ fn decode_bool(reader: &mut Reader) -> Result<Value, DecodeError> {
     }
 }
 
-fn decode_int64(reader: &mut Reader) -> Result<Value, DecodeError> {
+fn decode_int64<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
     let value = reader.read_signed_varint("int64")?;
     Ok(Value::Int64(value))
 }
 
-fn decode_float64(reader: &mut Reader) -> Result<Value, DecodeError> {
+fn decode_float64<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
     let value = reader.read_f64("float64")?;
     Ok(Value::Float64(value))
 }
 
-fn decode_decimal(reader: &mut Reader) -> Result<Value, DecodeError> {
+fn decode_decimal<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
     let exponent = reader.read_signed_varint("decimal.exponent")? as i32;
     let mantissa_type = reader.read_byte("decimal.mantissa_type")?;
 
@@ -80,7 +82,7 @@ fn decode_decimal(reader: &mut Reader) -> Result<Value, DecodeError> {
                 }
             }
 
-            DecimalMantissa::Big(bytes.to_vec())
+            DecimalMantissa::Big(Cow::Borrowed(bytes))
         }
         _ => {
             return Err(DecodeError::MalformedEncoding {
@@ -108,8 +110,8 @@ fn decode_decimal(reader: &mut Reader) -> Result<Value, DecodeError> {
     Ok(Value::Decimal { exponent, mantissa })
 }
 
-fn decode_text(reader: &mut Reader, dicts: &WireDictionaries) -> Result<Value, DecodeError> {
-    let value = reader.read_string(MAX_STRING_LEN, "text")?;
+fn decode_text<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Result<Value<'a>, DecodeError> {
+    let value = reader.read_str(MAX_STRING_LEN, "text")?;
     let lang_index = reader.read_varint("text.language")? as usize;
 
     let language = if lang_index == 0 {
@@ -126,26 +128,34 @@ fn decode_text(reader: &mut Reader, dicts: &WireDictionaries) -> Result<Value, D
         Some(dicts.languages[idx])
     };
 
-    Ok(Value::Text { value, language })
+    Ok(Value::Text { value: Cow::Borrowed(value), language })
 }
 
-fn decode_bytes(reader: &mut Reader) -> Result<Value, DecodeError> {
-    let bytes = reader.read_bytes_prefixed(MAX_BYTES_LEN, "bytes")?;
-    Ok(Value::Bytes(bytes))
+fn decode_bytes<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
+    let len = reader.read_varint("bytes.len")? as usize;
+    if len > MAX_BYTES_LEN {
+        return Err(DecodeError::LengthExceedsLimit {
+            field: "bytes",
+            len,
+            max: MAX_BYTES_LEN,
+        });
+    }
+    let bytes = reader.read_bytes(len, "bytes")?;
+    Ok(Value::Bytes(Cow::Borrowed(bytes)))
 }
 
-fn decode_timestamp(reader: &mut Reader) -> Result<Value, DecodeError> {
+fn decode_timestamp<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
     let value = reader.read_signed_varint("timestamp")?;
     Ok(Value::Timestamp(value))
 }
 
-fn decode_date(reader: &mut Reader) -> Result<Value, DecodeError> {
-    let value = reader.read_string(MAX_STRING_LEN, "date")?;
+fn decode_date<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
+    let value = reader.read_str(MAX_STRING_LEN, "date")?;
     // TODO: validate ISO 8601 format
-    Ok(Value::Date(value))
+    Ok(Value::Date(Cow::Borrowed(value)))
 }
 
-fn decode_point(reader: &mut Reader) -> Result<Value, DecodeError> {
+fn decode_point<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
     let lat = reader.read_f64("point.lat")?;
     let lon = reader.read_f64("point.lon")?;
 
@@ -160,7 +170,7 @@ fn decode_point(reader: &mut Reader) -> Result<Value, DecodeError> {
     Ok(Value::Point { lat, lon })
 }
 
-fn decode_embedding(reader: &mut Reader) -> Result<Value, DecodeError> {
+fn decode_embedding<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
     let sub_type_byte = reader.read_byte("embedding.sub_type")?;
     let sub_type = EmbeddingSubType::from_u8(sub_type_byte)
         .ok_or(DecodeError::InvalidEmbeddingSubType { sub_type: sub_type_byte })?;
@@ -183,7 +193,7 @@ fn decode_embedding(reader: &mut Reader) -> Result<Value, DecodeError> {
         });
     }
 
-    let data = reader.read_bytes(expected_bytes, "embedding.data")?.to_vec();
+    let data = reader.read_bytes(expected_bytes, "embedding.data")?;
 
     // Validate no NaN in float32 embeddings
     if sub_type == EmbeddingSubType::Float32 {
@@ -207,10 +217,10 @@ fn decode_embedding(reader: &mut Reader) -> Result<Value, DecodeError> {
         }
     }
 
-    Ok(Value::Embedding { sub_type, dims, data })
+    Ok(Value::Embedding { sub_type, dims, data: Cow::Borrowed(data) })
 }
 
-fn decode_ref(reader: &mut Reader, dicts: &WireDictionaries) -> Result<Value, DecodeError> {
+fn decode_ref<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Result<Value<'a>, DecodeError> {
     let index = reader.read_varint("ref")? as usize;
     if index >= dicts.objects.len() {
         return Err(DecodeError::IndexOutOfBounds {
@@ -223,10 +233,10 @@ fn decode_ref(reader: &mut Reader, dicts: &WireDictionaries) -> Result<Value, De
 }
 
 /// Decodes a PropertyValue (property index + value + optional language).
-pub fn decode_property_value(
-    reader: &mut Reader,
+pub fn decode_property_value<'a>(
+    reader: &mut Reader<'a>,
     dicts: &WireDictionaries,
-) -> Result<PropertyValue, DecodeError> {
+) -> Result<PropertyValue<'a>, DecodeError> {
     let prop_index = reader.read_varint("property")? as usize;
     if prop_index >= dicts.properties.len() {
         return Err(DecodeError::IndexOutOfBounds {
@@ -249,7 +259,7 @@ pub fn decode_property_value(
 /// Encodes a Value to the writer.
 pub fn encode_value(
     writer: &mut Writer,
-    value: &Value,
+    value: &Value<'_>,
     dict_builder: &mut DictionaryBuilder,
 ) -> Result<(), EncodeError> {
     match value {
@@ -333,7 +343,7 @@ pub fn encode_value(
 fn encode_decimal(
     writer: &mut Writer,
     exponent: i32,
-    mantissa: &DecimalMantissa,
+    mantissa: &DecimalMantissa<'_>,
 ) -> Result<(), EncodeError> {
     // Validate normalization
     match mantissa {
@@ -371,7 +381,7 @@ fn encode_decimal(
 /// Encodes a PropertyValue (property index + value + optional language).
 pub fn encode_property_value(
     writer: &mut Writer,
-    pv: &PropertyValue,
+    pv: &PropertyValue<'_>,
     dict_builder: &mut DictionaryBuilder,
     data_type: DataType,
 ) -> Result<(), EncodeError> {
@@ -394,15 +404,15 @@ pub fn validate_position(pos: &str) -> Result<(), EncodeError> {
     Ok(())
 }
 
-/// Decodes a position string with validation.
-pub fn decode_position(reader: &mut Reader) -> Result<String, DecodeError> {
-    let pos = reader.read_string(MAX_POSITION_LEN, "position")?;
+/// Decodes a position string with validation (zero-copy).
+pub fn decode_position<'a>(reader: &mut Reader<'a>) -> Result<Cow<'a, str>, DecodeError> {
+    let pos = reader.read_str(MAX_POSITION_LEN, "position")?;
     for c in pos.chars() {
         if !c.is_ascii_alphanumeric() {
             return Err(DecodeError::InvalidPositionChar { char: c });
         }
     }
-    Ok(pos)
+    Ok(Cow::Borrowed(pos))
 }
 
 // =============================================================================
@@ -412,7 +422,7 @@ pub fn decode_position(reader: &mut Reader) -> Result<String, DecodeError> {
 /// Computes the canonical payload bytes for a value (for value_id hashing).
 ///
 /// This implements the canonical payload table from spec Section 2.5.
-pub fn canonical_payload(value: &Value) -> Vec<u8> {
+pub fn canonical_payload(value: &Value<'_>) -> Vec<u8> {
     let mut buf = Vec::new();
 
     match value {
@@ -536,7 +546,7 @@ mod tests {
     #[test]
     fn test_text_roundtrip() {
         let value = Value::Text {
-            value: "hello world".to_string(),
+            value: Cow::Owned("hello world".to_string()),
             language: None,
         };
         let mut dict_builder = DictionaryBuilder::new();
@@ -550,7 +560,14 @@ mod tests {
         let mut reader = Reader::new(writer.as_bytes());
         let decoded = decode_value(&mut reader, DataType::Text, &decode_dicts).unwrap();
 
-        assert_eq!(value, decoded);
+        // Compare inner values since one is Owned and one is Borrowed
+        match (&value, &decoded) {
+            (Value::Text { value: v1, language: l1 }, Value::Text { value: v2, language: l2 }) => {
+                assert_eq!(v1.as_ref(), v2.as_ref());
+                assert_eq!(l1, l2);
+            }
+            _ => panic!("expected Text values"),
+        }
     }
 
     #[test]
@@ -583,7 +600,7 @@ mod tests {
         let value = Value::Embedding {
             sub_type: EmbeddingSubType::Float32,
             dims: 4,
-            data: vec![0u8; 16], // 4 dims * 4 bytes
+            data: Cow::Owned(vec![0u8; 16]), // 4 dims * 4 bytes
         };
         let dicts = WireDictionaries::default();
         let mut dict_builder = DictionaryBuilder::new();
@@ -594,7 +611,18 @@ mod tests {
         let mut reader = Reader::new(writer.as_bytes());
         let decoded = decode_value(&mut reader, DataType::Embedding, &dicts).unwrap();
 
-        assert_eq!(value, decoded);
+        // Compare inner values since one is Owned and one is Borrowed
+        match (&value, &decoded) {
+            (
+                Value::Embedding { sub_type: s1, dims: d1, data: data1 },
+                Value::Embedding { sub_type: s2, dims: d2, data: data2 },
+            ) => {
+                assert_eq!(s1, s2);
+                assert_eq!(d1, d2);
+                assert_eq!(data1.as_ref(), data2.as_ref());
+            }
+            _ => panic!("expected Embedding values"),
+        }
     }
 
     #[test]

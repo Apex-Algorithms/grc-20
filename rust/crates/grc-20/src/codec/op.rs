@@ -32,8 +32,10 @@ const UPDATE_ENTITY_RESERVED_MASK: u8 = 0xE0;
 // CreateRelation flags
 const FLAG_HAS_POSITION: u8 = 0x01;
 const FLAG_HAS_FROM_SPACE: u8 = 0x02;
-const FLAG_HAS_TO_SPACE: u8 = 0x04;
-const CREATE_RELATION_RESERVED_MASK: u8 = 0xF8;
+const FLAG_HAS_FROM_VERSION: u8 = 0x04;
+const FLAG_HAS_TO_SPACE: u8 = 0x08;
+const FLAG_HAS_TO_VERSION: u8 = 0x10;
+const RELATION_RESERVED_MASK: u8 = 0xE0;
 
 // Relation ID modes
 const MODE_UNIQUE: u8 = 0;
@@ -43,26 +45,26 @@ const MODE_INSTANCE: u8 = 1;
 // DECODING
 // =============================================================================
 
-/// Decodes an Op from the reader.
-pub fn decode_op(reader: &mut Reader, dicts: &WireDictionaries) -> Result<Op, DecodeError> {
+/// Decodes an Op from the reader (zero-copy).
+pub fn decode_op<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Result<Op<'a>, DecodeError> {
     let op_type = reader.read_byte("op_type")?;
 
     match op_type {
         OP_CREATE_ENTITY => decode_create_entity(reader, dicts),
         OP_UPDATE_ENTITY => decode_update_entity(reader, dicts),
-        OP_DELETE_ENTITY => decode_delete_entity(reader, dicts),
+        OP_DELETE_ENTITY => decode_delete_entity(reader),
         OP_CREATE_RELATION => decode_create_relation(reader, dicts),
         OP_UPDATE_RELATION => decode_update_relation(reader, dicts),
-        OP_DELETE_RELATION => decode_delete_relation(reader, dicts),
+        OP_DELETE_RELATION => decode_delete_relation(reader),
         OP_CREATE_PROPERTY => decode_create_property(reader),
         _ => Err(DecodeError::InvalidOpType { op_type }),
     }
 }
 
-fn decode_create_entity(
-    reader: &mut Reader,
+fn decode_create_entity<'a>(
+    reader: &mut Reader<'a>,
     dicts: &WireDictionaries,
-) -> Result<Op, DecodeError> {
+) -> Result<Op<'a>, DecodeError> {
     let id = reader.read_id("entity_id")?;
     let value_count = reader.read_varint("value_count")? as usize;
 
@@ -82,10 +84,10 @@ fn decode_create_entity(
     Ok(Op::CreateEntity(CreateEntity { id, values }))
 }
 
-fn decode_update_entity(
-    reader: &mut Reader,
+fn decode_update_entity<'a>(
+    reader: &mut Reader<'a>,
     dicts: &WireDictionaries,
-) -> Result<Op, DecodeError> {
+) -> Result<Op<'a>, DecodeError> {
     let id_index = reader.read_varint("entity_id")? as usize;
     if id_index >= dicts.objects.len() {
         return Err(DecodeError::IndexOutOfBounds {
@@ -189,28 +191,17 @@ fn decode_update_entity(
     Ok(Op::UpdateEntity(update))
 }
 
-fn decode_delete_entity(
-    reader: &mut Reader,
-    dicts: &WireDictionaries,
-) -> Result<Op, DecodeError> {
-    let id_index = reader.read_varint("entity_id")? as usize;
-    if id_index >= dicts.objects.len() {
-        return Err(DecodeError::IndexOutOfBounds {
-            dict: "objects",
-            index: id_index,
-            size: dicts.objects.len(),
-        });
-    }
-
-    Ok(Op::DeleteEntity(DeleteEntity {
-        id: dicts.objects[id_index],
-    }))
+fn decode_delete_entity<'a>(
+    reader: &mut Reader<'a>,
+) -> Result<Op<'a>, DecodeError> {
+    let id = reader.read_id("entity_id")?;
+    Ok(Op::DeleteEntity(DeleteEntity { id }))
 }
 
-fn decode_create_relation(
-    reader: &mut Reader,
+fn decode_create_relation<'a>(
+    reader: &mut Reader<'a>,
     dicts: &WireDictionaries,
-) -> Result<Op, DecodeError> {
+) -> Result<Op<'a>, DecodeError> {
     let mode = reader.read_byte("relation_mode")?;
 
     let id_mode = match mode {
@@ -261,7 +252,7 @@ fn decode_create_relation(
     let flags = reader.read_byte("relation_flags")?;
 
     // Check reserved bits
-    if flags & CREATE_RELATION_RESERVED_MASK != 0 {
+    if flags & RELATION_RESERVED_MASK != 0 {
         return Err(DecodeError::ReservedBitsSet {
             context: "CreateRelation flags",
         });
@@ -279,8 +270,20 @@ fn decode_create_relation(
         None
     };
 
+    let from_version = if flags & FLAG_HAS_FROM_VERSION != 0 {
+        Some(reader.read_id("from_version")?)
+    } else {
+        None
+    };
+
     let to_space = if flags & FLAG_HAS_TO_SPACE != 0 {
         Some(reader.read_id("to_space")?)
+    } else {
+        None
+    };
+
+    let to_version = if flags & FLAG_HAS_TO_VERSION != 0 {
+        Some(reader.read_id("to_version")?)
     } else {
         None
     };
@@ -293,14 +296,16 @@ fn decode_create_relation(
         entity,
         position,
         from_space,
+        from_version,
         to_space,
+        to_version,
     }))
 }
 
-fn decode_update_relation(
-    reader: &mut Reader,
+fn decode_update_relation<'a>(
+    reader: &mut Reader<'a>,
     dicts: &WireDictionaries,
-) -> Result<Op, DecodeError> {
+) -> Result<Op<'a>, DecodeError> {
     let id_index = reader.read_varint("relation_id")? as usize;
     if id_index >= dicts.objects.len() {
         return Err(DecodeError::IndexOutOfBounds {
@@ -309,34 +314,65 @@ fn decode_update_relation(
             size: dicts.objects.len(),
         });
     }
+    let id = dicts.objects[id_index];
 
-    let position = decode_position(reader)?;
+    let flags = reader.read_byte("relation_flags")?;
+
+    // Check reserved bits
+    if flags & RELATION_RESERVED_MASK != 0 {
+        return Err(DecodeError::ReservedBitsSet {
+            context: "UpdateRelation flags",
+        });
+    }
+
+    let position = if flags & FLAG_HAS_POSITION != 0 {
+        Some(decode_position(reader)?)
+    } else {
+        None
+    };
+
+    let from_space = if flags & FLAG_HAS_FROM_SPACE != 0 {
+        Some(reader.read_id("from_space")?)
+    } else {
+        None
+    };
+
+    let from_version = if flags & FLAG_HAS_FROM_VERSION != 0 {
+        Some(reader.read_id("from_version")?)
+    } else {
+        None
+    };
+
+    let to_space = if flags & FLAG_HAS_TO_SPACE != 0 {
+        Some(reader.read_id("to_space")?)
+    } else {
+        None
+    };
+
+    let to_version = if flags & FLAG_HAS_TO_VERSION != 0 {
+        Some(reader.read_id("to_version")?)
+    } else {
+        None
+    };
 
     Ok(Op::UpdateRelation(UpdateRelation {
-        id: dicts.objects[id_index],
+        id,
         position,
+        from_space,
+        from_version,
+        to_space,
+        to_version,
     }))
 }
 
-fn decode_delete_relation(
-    reader: &mut Reader,
-    dicts: &WireDictionaries,
-) -> Result<Op, DecodeError> {
-    let id_index = reader.read_varint("relation_id")? as usize;
-    if id_index >= dicts.objects.len() {
-        return Err(DecodeError::IndexOutOfBounds {
-            dict: "objects",
-            index: id_index,
-            size: dicts.objects.len(),
-        });
-    }
-
-    Ok(Op::DeleteRelation(DeleteRelation {
-        id: dicts.objects[id_index],
-    }))
+fn decode_delete_relation<'a>(
+    reader: &mut Reader<'a>,
+) -> Result<Op<'a>, DecodeError> {
+    let id = reader.read_id("relation_id")?;
+    Ok(Op::DeleteRelation(DeleteRelation { id }))
 }
 
-fn decode_create_property(reader: &mut Reader) -> Result<Op, DecodeError> {
+fn decode_create_property<'a>(reader: &mut Reader<'a>) -> Result<Op<'a>, DecodeError> {
     let id = reader.read_id("property_id")?;
     let data_type_byte = reader.read_byte("data_type")?;
     let data_type = DataType::from_u8(data_type_byte)
@@ -355,7 +391,7 @@ fn decode_create_property(reader: &mut Reader) -> Result<Op, DecodeError> {
 /// populated with all IDs that will be referenced. Call `collect_op_ids` first.
 pub fn encode_op(
     writer: &mut Writer,
-    op: &Op,
+    op: &Op<'_>,
     dict_builder: &mut DictionaryBuilder,
     property_types: &rustc_hash::FxHashMap<crate::model::Id, DataType>,
 ) -> Result<(), EncodeError> {
@@ -372,7 +408,7 @@ pub fn encode_op(
 
 fn encode_create_entity(
     writer: &mut Writer,
-    ce: &CreateEntity,
+    ce: &CreateEntity<'_>,
     dict_builder: &mut DictionaryBuilder,
     property_types: &rustc_hash::FxHashMap<crate::model::Id, DataType>,
 ) -> Result<(), EncodeError> {
@@ -392,7 +428,7 @@ fn encode_create_entity(
 
 fn encode_update_entity(
     writer: &mut Writer,
-    ue: &UpdateEntity,
+    ue: &UpdateEntity<'_>,
     dict_builder: &mut DictionaryBuilder,
     property_types: &rustc_hash::FxHashMap<crate::model::Id, DataType>,
 ) -> Result<(), EncodeError> {
@@ -481,7 +517,7 @@ fn encode_delete_entity(
 
 fn encode_create_relation(
     writer: &mut Writer,
-    cr: &CreateRelation,
+    cr: &CreateRelation<'_>,
     dict_builder: &mut DictionaryBuilder,
 ) -> Result<(), EncodeError> {
     writer.write_byte(OP_CREATE_RELATION);
@@ -514,8 +550,14 @@ fn encode_create_relation(
     if cr.from_space.is_some() {
         flags |= FLAG_HAS_FROM_SPACE;
     }
+    if cr.from_version.is_some() {
+        flags |= FLAG_HAS_FROM_VERSION;
+    }
     if cr.to_space.is_some() {
         flags |= FLAG_HAS_TO_SPACE;
+    }
+    if cr.to_version.is_some() {
+        flags |= FLAG_HAS_TO_VERSION;
     }
     writer.write_byte(flags);
 
@@ -528,8 +570,16 @@ fn encode_create_relation(
         writer.write_id(space);
     }
 
+    if let Some(version) = &cr.from_version {
+        writer.write_id(version);
+    }
+
     if let Some(space) = &cr.to_space {
         writer.write_id(space);
+    }
+
+    if let Some(version) = &cr.to_version {
+        writer.write_id(version);
     }
 
     Ok(())
@@ -537,7 +587,7 @@ fn encode_create_relation(
 
 fn encode_update_relation(
     writer: &mut Writer,
-    ur: &UpdateRelation,
+    ur: &UpdateRelation<'_>,
     dict_builder: &mut DictionaryBuilder,
 ) -> Result<(), EncodeError> {
     writer.write_byte(OP_UPDATE_RELATION);
@@ -545,8 +595,44 @@ fn encode_update_relation(
     let id_index = dict_builder.add_object(ur.id);
     writer.write_varint(id_index as u64);
 
-    validate_position(&ur.position)?;
-    writer.write_string(&ur.position);
+    let mut flags = 0u8;
+    if ur.position.is_some() {
+        flags |= FLAG_HAS_POSITION;
+    }
+    if ur.from_space.is_some() {
+        flags |= FLAG_HAS_FROM_SPACE;
+    }
+    if ur.from_version.is_some() {
+        flags |= FLAG_HAS_FROM_VERSION;
+    }
+    if ur.to_space.is_some() {
+        flags |= FLAG_HAS_TO_SPACE;
+    }
+    if ur.to_version.is_some() {
+        flags |= FLAG_HAS_TO_VERSION;
+    }
+    writer.write_byte(flags);
+
+    if let Some(pos) = &ur.position {
+        validate_position(pos)?;
+        writer.write_string(pos);
+    }
+
+    if let Some(space) = &ur.from_space {
+        writer.write_id(space);
+    }
+
+    if let Some(version) = &ur.from_version {
+        writer.write_id(version);
+    }
+
+    if let Some(space) = &ur.to_space {
+        writer.write_id(space);
+    }
+
+    if let Some(version) = &ur.to_version {
+        writer.write_id(version);
+    }
 
     Ok(())
 }
@@ -571,7 +657,7 @@ fn encode_create_property(writer: &mut Writer, cp: &CreateProperty) -> Result<()
 
 fn encode_property_value(
     writer: &mut Writer,
-    pv: &PropertyValue,
+    pv: &PropertyValue<'_>,
     dict_builder: &mut DictionaryBuilder,
     data_type: DataType,
 ) -> Result<(), EncodeError> {
@@ -583,6 +669,8 @@ fn encode_property_value(
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
     use crate::model::Value;
 
@@ -593,7 +681,7 @@ mod tests {
             values: vec![PropertyValue {
                 property: [2u8; 16],
                 value: Value::Text {
-                    value: "test".to_string(),
+                    value: Cow::Owned("test".to_string()),
                     language: None,
                 },
             }],
@@ -610,7 +698,24 @@ mod tests {
         let mut reader = Reader::new(writer.as_bytes());
         let decoded = decode_op(&mut reader, &dicts).unwrap();
 
-        assert_eq!(op, decoded);
+        // Compare by extracting values since Cow::Owned vs Cow::Borrowed
+        match (&op, &decoded) {
+            (Op::CreateEntity(e1), Op::CreateEntity(e2)) => {
+                assert_eq!(e1.id, e2.id);
+                assert_eq!(e1.values.len(), e2.values.len());
+                for (v1, v2) in e1.values.iter().zip(e2.values.iter()) {
+                    assert_eq!(v1.property, v2.property);
+                    match (&v1.value, &v2.value) {
+                        (Value::Text { value: s1, language: l1 }, Value::Text { value: s2, language: l2 }) => {
+                            assert_eq!(s1.as_ref(), s2.as_ref());
+                            assert_eq!(l1, l2);
+                        }
+                        _ => panic!("expected Text values"),
+                    }
+                }
+            }
+            _ => panic!("expected CreateEntity"),
+        }
     }
 
     #[test]
@@ -621,9 +726,11 @@ mod tests {
             from: [2u8; 16],
             to: [3u8; 16],
             entity: [4u8; 16],
-            position: Some("abc".to_string()),
+            position: Some(Cow::Owned("abc".to_string())),
             from_space: None,
+            from_version: None,
             to_space: None,
+            to_version: None,
         });
 
         let mut dict_builder = DictionaryBuilder::new();
@@ -636,7 +743,22 @@ mod tests {
         let mut reader = Reader::new(writer.as_bytes());
         let decoded = decode_op(&mut reader, &dicts).unwrap();
 
-        assert_eq!(op, decoded);
+        // Compare by extracting values
+        match (&op, &decoded) {
+            (Op::CreateRelation(r1), Op::CreateRelation(r2)) => {
+                assert_eq!(r1.id_mode, r2.id_mode);
+                assert_eq!(r1.relation_type, r2.relation_type);
+                assert_eq!(r1.from, r2.from);
+                assert_eq!(r1.to, r2.to);
+                assert_eq!(r1.entity, r2.entity);
+                match (&r1.position, &r2.position) {
+                    (Some(p1), Some(p2)) => assert_eq!(p1.as_ref(), p2.as_ref()),
+                    (None, None) => {}
+                    _ => panic!("position mismatch"),
+                }
+            }
+            _ => panic!("expected CreateRelation"),
+        }
     }
 
     #[test]
@@ -649,7 +771,9 @@ mod tests {
             entity: [4u8; 16],
             position: None,
             from_space: None,
+            from_version: None,
             to_space: None,
+            to_version: None,
         });
 
         let mut dict_builder = DictionaryBuilder::new();
@@ -662,7 +786,98 @@ mod tests {
         let mut reader = Reader::new(writer.as_bytes());
         let decoded = decode_op(&mut reader, &dicts).unwrap();
 
-        assert_eq!(op, decoded);
+        // Direct comparison works since no borrowed strings
+        match (&op, &decoded) {
+            (Op::CreateRelation(r1), Op::CreateRelation(r2)) => {
+                assert_eq!(r1.id_mode, r2.id_mode);
+                assert_eq!(r1.relation_type, r2.relation_type);
+                assert_eq!(r1.from, r2.from);
+                assert_eq!(r1.to, r2.to);
+                assert_eq!(r1.entity, r2.entity);
+                assert!(r1.position.is_none() && r2.position.is_none());
+            }
+            _ => panic!("expected CreateRelation"),
+        }
+    }
+
+    #[test]
+    fn test_create_relation_with_versions() {
+        let op = Op::CreateRelation(CreateRelation {
+            id_mode: RelationIdMode::Instance([10u8; 16]),
+            relation_type: [1u8; 16],
+            from: [2u8; 16],
+            to: [3u8; 16],
+            entity: [4u8; 16],
+            position: Some(Cow::Owned("abc".to_string())),
+            from_space: Some([5u8; 16]),
+            from_version: Some([6u8; 16]),
+            to_space: Some([7u8; 16]),
+            to_version: Some([8u8; 16]),
+        });
+
+        let mut dict_builder = DictionaryBuilder::new();
+        let property_types = rustc_hash::FxHashMap::default();
+
+        let mut writer = Writer::new();
+        encode_op(&mut writer, &op, &mut dict_builder, &property_types).unwrap();
+
+        let dicts = dict_builder.build();
+        let mut reader = Reader::new(writer.as_bytes());
+        let decoded = decode_op(&mut reader, &dicts).unwrap();
+
+        match (&op, &decoded) {
+            (Op::CreateRelation(r1), Op::CreateRelation(r2)) => {
+                assert_eq!(r1.id_mode, r2.id_mode);
+                assert_eq!(r1.relation_type, r2.relation_type);
+                assert_eq!(r1.from, r2.from);
+                assert_eq!(r1.to, r2.to);
+                assert_eq!(r1.entity, r2.entity);
+                assert_eq!(r1.from_space, r2.from_space);
+                assert_eq!(r1.from_version, r2.from_version);
+                assert_eq!(r1.to_space, r2.to_space);
+                assert_eq!(r1.to_version, r2.to_version);
+            }
+            _ => panic!("expected CreateRelation"),
+        }
+    }
+
+    #[test]
+    fn test_update_relation_roundtrip() {
+        let op = Op::UpdateRelation(UpdateRelation {
+            id: [1u8; 16],
+            position: Some(Cow::Owned("xyz".to_string())),
+            from_space: Some([2u8; 16]),
+            from_version: Some([3u8; 16]),
+            to_space: None,
+            to_version: Some([4u8; 16]),
+        });
+
+        let mut dict_builder = DictionaryBuilder::new();
+        dict_builder.add_object([1u8; 16]); // Pre-add the relation ID
+        let property_types = rustc_hash::FxHashMap::default();
+
+        let mut writer = Writer::new();
+        encode_op(&mut writer, &op, &mut dict_builder, &property_types).unwrap();
+
+        let dicts = dict_builder.build();
+        let mut reader = Reader::new(writer.as_bytes());
+        let decoded = decode_op(&mut reader, &dicts).unwrap();
+
+        match (&op, &decoded) {
+            (Op::UpdateRelation(r1), Op::UpdateRelation(r2)) => {
+                assert_eq!(r1.id, r2.id);
+                match (&r1.position, &r2.position) {
+                    (Some(p1), Some(p2)) => assert_eq!(p1.as_ref(), p2.as_ref()),
+                    (None, None) => {}
+                    _ => panic!("position mismatch"),
+                }
+                assert_eq!(r1.from_space, r2.from_space);
+                assert_eq!(r1.from_version, r2.from_version);
+                assert_eq!(r1.to_space, r2.to_space);
+                assert_eq!(r1.to_version, r2.to_version);
+            }
+            _ => panic!("expected UpdateRelation"),
+        }
     }
 
     #[test]

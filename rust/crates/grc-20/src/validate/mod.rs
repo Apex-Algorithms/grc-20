@@ -117,6 +117,8 @@ pub fn validate_position(pos: &str) -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
     use crate::model::{CreateEntity, CreateProperty};
 
@@ -127,7 +129,7 @@ mod tests {
 
         let edit = Edit {
             id: [0u8; 16],
-            name: String::new(),
+            name: Cow::Borrowed(""),
             authors: vec![],
             created_at: 0,
             ops: vec![Op::CreateEntity(CreateEntity {
@@ -135,7 +137,7 @@ mod tests {
                 values: vec![PropertyValue {
                     property: [1u8; 16],
                     value: Value::Text {
-                        value: "not an int".to_string(),
+                        value: Cow::Owned("not an int".to_string()),
                         language: None,
                     },
                 }],
@@ -153,7 +155,7 @@ mod tests {
 
         let edit = Edit {
             id: [0u8; 16],
-            name: String::new(),
+            name: Cow::Borrowed(""),
             authors: vec![],
             created_at: 0,
             ops: vec![Op::CreateEntity(CreateEntity {
@@ -176,7 +178,7 @@ mod tests {
 
         let edit = Edit {
             id: [0u8; 16],
-            name: String::new(),
+            name: Cow::Borrowed(""),
             authors: vec![],
             created_at: 0,
             ops: vec![Op::CreateProperty(CreateProperty {
@@ -198,7 +200,7 @@ mod tests {
 
         let edit = Edit {
             id: [0u8; 16],
-            name: String::new(),
+            name: Cow::Borrowed(""),
             authors: vec![],
             created_at: 0,
             ops: vec![Op::CreateEntity(CreateEntity {
@@ -206,7 +208,7 @@ mod tests {
                 values: vec![PropertyValue {
                     property: [99u8; 16], // Unknown property
                     value: Value::Text {
-                        value: "test".to_string(),
+                        value: Cow::Owned("test".to_string()),
                         language: None,
                     },
                 }],
@@ -224,7 +226,7 @@ mod tests {
 
         let edit = Edit {
             id: [0u8; 16],
-            name: String::new(),
+            name: Cow::Borrowed(""),
             authors: vec![],
             created_at: 0,
             ops: vec![
@@ -239,7 +241,7 @@ mod tests {
                     values: vec![PropertyValue {
                         property: [1u8; 16],
                         value: Value::Text {
-                            value: "test".to_string(),
+                            value: Cow::Owned("test".to_string()),
                             language: None,
                         },
                     }],

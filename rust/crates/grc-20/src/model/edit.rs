@@ -2,6 +2,8 @@
 //!
 //! Edits are standalone patches containing a batch of ops with metadata.
 
+use std::borrow::Cow;
+
 use rustc_hash::FxHashMap;
 
 use crate::codec::primitives::Writer;
@@ -12,25 +14,25 @@ use crate::model::{DataType, Id, Op};
 /// Edits are standalone patches. They contain no parent references;
 /// ordering is provided by on-chain governance.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Edit {
+pub struct Edit<'a> {
     /// The edit's unique identifier.
     pub id: Id,
     /// Optional human-readable name.
-    pub name: String,
+    pub name: Cow<'a, str>,
     /// Author entity IDs.
     pub authors: Vec<Id>,
     /// Creation timestamp (metadata only, not used for conflict resolution).
     pub created_at: i64,
     /// Operations in this edit.
-    pub ops: Vec<Op>,
+    pub ops: Vec<Op<'a>>,
 }
 
-impl Edit {
+impl<'a> Edit<'a> {
     /// Creates a new empty edit with the given ID.
     pub fn new(id: Id) -> Self {
         Self {
             id,
-            name: String::new(),
+            name: Cow::Borrowed(""),
             authors: Vec::new(),
             created_at: 0,
             ops: Vec::new(),
@@ -38,7 +40,7 @@ impl Edit {
     }
 
     /// Creates a new empty edit with the given ID and name.
-    pub fn with_name(id: Id, name: impl Into<String>) -> Self {
+    pub fn with_name(id: Id, name: impl Into<Cow<'a, str>>) -> Self {
         Self {
             id,
             name: name.into(),

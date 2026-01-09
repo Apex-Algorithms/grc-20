@@ -68,3 +68,10 @@ Thumbs.db
 # Generated protobuf files (optional - uncomment if you want to regenerate each time)
 # src/grc20/*_pb2.py
 # src/grc20/*_pb2.pyi
+
+# Rust
+target/
+rust/target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
