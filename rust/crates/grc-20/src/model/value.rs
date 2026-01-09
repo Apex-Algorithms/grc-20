@@ -20,7 +20,6 @@ pub enum DataType {
     Date = 8,
     Point = 9,
     Embedding = 10,
-    Ref = 11,
 }
 
 impl DataType {
@@ -37,7 +36,6 @@ impl DataType {
             8 => Some(DataType::Date),
             9 => Some(DataType::Point),
             10 => Some(DataType::Embedding),
-            11 => Some(DataType::Ref),
             _ => None,
         }
     }
@@ -168,9 +166,6 @@ pub enum Value<'a> {
         /// Raw bytes in the format specified by sub_type.
         data: Cow<'a, [u8]>,
     },
-
-    /// Non-traversable object reference.
-    Ref(Id),
 }
 
 impl Value<'_> {
@@ -187,7 +182,6 @@ impl Value<'_> {
             Value::Date(_) => DataType::Date,
             Value::Point { .. } => DataType::Point,
             Value::Embedding { .. } => DataType::Embedding,
-            Value::Ref(_) => DataType::Ref,
         }
     }
 

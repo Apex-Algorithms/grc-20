@@ -317,7 +317,6 @@ fn value_to_owned(v: crate::model::Value<'_>) -> crate::model::Value<'static> {
             dims,
             data: Cow::Owned(data.into_owned()),
         },
-        Value::Ref(r) => Value::Ref(r),
     }
 }
 

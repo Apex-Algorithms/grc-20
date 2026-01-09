@@ -65,7 +65,7 @@ pub struct WireDictionaries {
     pub languages: Vec<Id>,
     /// Unit entity IDs for numerical values.
     pub units: Vec<Id>,
-    /// Object IDs (entities, relations, REF targets).
+    /// Object IDs (entities and relations).
     pub objects: Vec<Id>,
 }
 

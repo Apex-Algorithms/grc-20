@@ -33,7 +33,6 @@ pub fn decode_value<'a>(
         DataType::Date => decode_date(reader),
         DataType::Point => decode_point(reader),
         DataType::Embedding => decode_embedding(reader),
-        DataType::Ref => decode_ref(reader, dicts),
     }
 }
 
@@ -263,18 +262,6 @@ fn decode_embedding<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeErro
     Ok(Value::Embedding { sub_type, dims, data: Cow::Borrowed(data) })
 }
 
-fn decode_ref<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Result<Value<'a>, DecodeError> {
-    let index = reader.read_varint("ref")? as usize;
-    if index >= dicts.objects.len() {
-        return Err(DecodeError::IndexOutOfBounds {
-            dict: "objects",
-            index,
-            size: dicts.objects.len(),
-        });
-    }
-    Ok(Value::Ref(dicts.objects[index]))
-}
-
 /// Decodes a PropertyValue (property index + value + optional language).
 pub fn decode_property_value<'a>(
     reader: &mut Reader<'a>,
@@ -375,10 +362,6 @@ pub fn encode_value(
             writer.write_byte(*sub_type as u8);
             writer.write_varint(*dims as u64);
             writer.write_bytes(data);
-        }
-        Value::Ref(id) => {
-            let index = dict_builder.add_object(*id);
-            writer.write_varint(index as u64);
         }
     }
     Ok(())

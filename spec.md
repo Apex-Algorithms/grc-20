@@ -91,7 +91,7 @@ Property {
 }
 
 DataType := BOOL | INT64 | FLOAT64 | DECIMAL | TEXT | BYTES
-          | TIMESTAMP | DATE | POINT | EMBEDDING | REF
+          | TIMESTAMP | DATE | POINT | EMBEDDING
 ```
 
 Property names are defined via values in the knowledge layer, not in the protocol.
@@ -110,7 +110,6 @@ Property names are defined via values in the knowledge layer, not in the protoco
 | DATE | 8 | ISO 8601 date string |
 | POINT | 9 | WGS84 coordinate |
 | EMBEDDING | 10 | Dense vector |
-| REF | 11 | Object reference |
 
 **Data type semantics:**
 
@@ -126,7 +125,6 @@ Property names are defined via values in the knowledge layer, not in the protoco
 | DATE | UTF-8 string | ISO 8601 (variable precision) |
 | POINT | Two FLOAT64, little-endian | [latitude, longitude] WGS84 |
 | EMBEDDING | sub_type + dims + bytes | Dense vector for similarity search |
-| REF | ID | Non-traversable object reference |
 
 #### DECIMAL
 
@@ -200,15 +198,6 @@ EMBEDDING {
 | 0x02 binary | Bit-packed, LSB-first | 1/8 |
 
 **Binary bit order (NORMATIVE):** For subtype 0x02, dimension `i` maps to byte `i / 8`, bit position `i % 8` where bit 0 is the least significant bit. Bits beyond `dims` in the final byte MUST be zero.
-
-#### REF vs Relation
-
-| Concept | Type | Use Case | Indexed |
-|---------|------|----------|---------|
-| REF | Property value | Metadata pointer: `unit: kg` | By value only |
-| Relation | Directed edge | Graph edge: `Alice knows Bob` | Forward and reverse |
-
-**When to choose:** Use REF for lightweight, non-traversable references where reverse lookup is not needed (e.g., unit of measurement, currency, category tags). Use Relation when you need bidirectional graph traversal (e.g., "find all books by this author"). REF is a property value; Relation is a first-class graph edge with its own reified entity.
 
 ### 2.5 Values
 
@@ -544,7 +533,7 @@ The property dictionary includes both ID and DataType. This allows values to omi
 
 **Unit dictionary requirement (NORMATIVE):** All units referenced in numerical values (INT64, FLOAT64, DECIMAL) MUST be declared in the `unit_ids` dictionary. Unit index 0 means no unit; indices 1+ reference `unit_ids[index-1]`. Only numerical values have the unit field.
 
-**Object dictionary requirement (NORMATIVE):** All objects (entities and relations) referenced in an edit MUST be declared in the `object_ids` dictionary. This includes: operation targets (UpdateEntity, DeleteEntity, etc.), relation endpoints (`from`, `to`), and REF property values.
+**Object dictionary requirement (NORMATIVE):** All objects (entities and relations) referenced in an edit MUST be declared in the `object_ids` dictionary. This includes: operation targets (UpdateEntity, DeleteEntity, etc.) and relation endpoints (`from`, `to`).
 
 **Unique-mode relations:** In unique mode, the relation ID is derived (Section 2.6). To reference a unique-mode relation in the same edit (e.g., UpdateRelation to set position), the encoder MUST compute the derived ID and include it in `object_ids`. CreateRelation itself does not require the relation ID in the dictionary since it encodes the ID inline (instance mode) or derives it (unique mode).
 
@@ -800,7 +789,6 @@ Embedding:
     f32: dims × 4 bytes, little-endian
     i8: dims × 1 byte
     binary: ceil(dims / 8) bytes
-Ref: ObjectRef
 ```
 
 **DECIMAL encoding rules (NORMATIVE):**
@@ -922,7 +910,6 @@ Indexers MUST reject edits that fail structural validation:
 | DeleteEntity | DEAD | Ignored (idempotent) |
 | CreateRelation | Endpoint NOT_FOUND | Relation created (dangling reference allowed) |
 | CreateRelation | Endpoint DEAD | Relation created (dangling reference allowed) |
-| REF value | Target NOT_FOUND/DEAD | Value stored (referential integrity not enforced) |
 
 Dangling references are permitted to support cross-space links and out-of-order edit arrival. Applications MAY enforce referential integrity at a higher layer.
 
