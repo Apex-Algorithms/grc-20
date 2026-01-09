@@ -326,10 +326,10 @@ fn validate_year_part(s: &str, is_bce: bool) -> Result<u32, DecodeError> {
             context: "DATE year contains non-digit characters",
         });
     }
-    // BCE years can't be 0000 (there's no year 0 in ISO 8601)
+    // Reject "-0000" as redundant (use "0000" instead which equals 1 BCE in astronomical numbering)
     if is_bce && s.chars().all(|c| c == '0') {
         return Err(DecodeError::MalformedEncoding {
-            context: "DATE year 0000 is invalid",
+            context: "DATE -0000 is invalid (use 0000 for 1 BCE)",
         });
     }
     s.parse::<u32>().map_err(|_| DecodeError::MalformedEncoding {

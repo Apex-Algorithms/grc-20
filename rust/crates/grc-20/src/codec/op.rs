@@ -9,7 +9,7 @@ use crate::limits::MAX_VALUES_PER_ENTITY;
 use crate::model::{
     CreateEntity, CreateProperty, CreateRelation, DataType, DeleteEntity, DeleteRelation,
     DictionaryBuilder, Op, PropertyValue, RelationIdMode, RestoreEntity, RestoreRelation,
-    UnsetProperty, UpdateEntity, UpdateRelation, WireDictionaries,
+    UnsetLanguage, UnsetProperty, UpdateEntity, UpdateRelation, WireDictionaries,
 };
 
 // Op type constants (grouped by lifecycle: Create, Update, Delete, Restore)
@@ -149,19 +149,22 @@ fn decode_update_entity<'a>(
             }
             let property = dicts.properties[prop_index].0;
 
-            let lang_index = reader.read_varint("unset.language")? as usize;
-            let language = if lang_index == 0 {
-                None
+            // Language encoding: 0xFFFFFFFF = all, 0 = non-linguistic, 1+ = specific language
+            let lang_value = reader.read_varint("unset.language")? as u32;
+            let language = if lang_value == 0xFFFFFFFF {
+                UnsetLanguage::All
+            } else if lang_value == 0 {
+                UnsetLanguage::NonLinguistic
             } else {
-                let idx = lang_index - 1;
+                let idx = (lang_value - 1) as usize;
                 if idx >= dicts.languages.len() {
                     return Err(DecodeError::IndexOutOfBounds {
                         dict: "languages",
-                        index: lang_index,
+                        index: lang_value as usize,
                         size: dicts.languages.len() + 1,
                     });
                 }
-                Some(dicts.languages[idx])
+                UnsetLanguage::Specific(dicts.languages[idx])
             };
 
             update.unset_properties.push(UnsetProperty { property, language });
@@ -476,8 +479,16 @@ fn encode_update_entity(
             // We need the data type to add to dictionary, use a placeholder
             let idx = dict_builder.add_property(unset.property, DataType::Bool);
             writer.write_varint(idx as u64);
-            let lang_index = dict_builder.add_language(unset.language);
-            writer.write_varint(lang_index as u64);
+            // Language encoding: 0xFFFFFFFF = all, 0 = non-linguistic, 1+ = specific language
+            let lang_value: u32 = match &unset.language {
+                UnsetLanguage::All => 0xFFFFFFFF,
+                UnsetLanguage::NonLinguistic => 0,
+                UnsetLanguage::Specific(lang_id) => {
+                    let lang_index = dict_builder.add_language(Some(*lang_id));
+                    lang_index as u32
+                }
+            };
+            writer.write_varint(lang_value as u64);
         }
     }
 

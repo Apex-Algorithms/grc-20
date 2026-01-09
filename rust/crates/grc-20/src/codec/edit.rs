@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::io::Read;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::codec::op::{decode_op, encode_op};
 use crate::codec::primitives::{Reader, Writer};
@@ -111,7 +111,7 @@ fn decode_edit_borrowed(input: &[u8]) -> Result<Edit<'_>, DecodeError> {
     let authors = reader.read_id_vec(MAX_AUTHORS, "authors")?;
     let created_at = reader.read_signed_varint("created_at")?;
 
-    // Schema dictionaries
+    // Schema dictionaries (with duplicate detection)
     let property_count = reader.read_varint("property_count")? as usize;
     if property_count > MAX_DICT_SIZE {
         return Err(DecodeError::LengthExceedsLimit {
@@ -121,18 +121,22 @@ fn decode_edit_borrowed(input: &[u8]) -> Result<Edit<'_>, DecodeError> {
         });
     }
     let mut properties = Vec::with_capacity(property_count);
+    let mut seen_props = FxHashSet::with_capacity_and_hasher(property_count, Default::default());
     for _ in 0..property_count {
         let id = reader.read_id("property_id")?;
+        if !seen_props.insert(id) {
+            return Err(DecodeError::DuplicateDictionaryEntry { dict: "properties", id });
+        }
         let dt_byte = reader.read_byte("data_type")?;
         let data_type = DataType::from_u8(dt_byte)
             .ok_or(DecodeError::InvalidDataType { data_type: dt_byte })?;
         properties.push((id, data_type));
     }
 
-    let relation_types = reader.read_id_vec(MAX_DICT_SIZE, "relation_types")?;
-    let languages = reader.read_id_vec(MAX_DICT_SIZE, "languages")?;
-    let units = reader.read_id_vec(MAX_DICT_SIZE, "units")?;
-    let objects = reader.read_id_vec(MAX_DICT_SIZE, "objects")?;
+    let relation_types = read_id_vec_no_duplicates(&mut reader, MAX_DICT_SIZE, "relation_types")?;
+    let languages = read_id_vec_no_duplicates(&mut reader, MAX_DICT_SIZE, "languages")?;
+    let units = read_id_vec_no_duplicates(&mut reader, MAX_DICT_SIZE, "units")?;
+    let objects = read_id_vec_no_duplicates(&mut reader, MAX_DICT_SIZE, "objects")?;
 
     let dicts = WireDictionaries {
         properties,
@@ -185,7 +189,7 @@ fn decode_edit_owned(data: &[u8]) -> Result<Edit<'static>, DecodeError> {
     let authors = reader.read_id_vec(MAX_AUTHORS, "authors")?;
     let created_at = reader.read_signed_varint("created_at")?;
 
-    // Schema dictionaries
+    // Schema dictionaries (with duplicate detection)
     let property_count = reader.read_varint("property_count")? as usize;
     if property_count > MAX_DICT_SIZE {
         return Err(DecodeError::LengthExceedsLimit {
@@ -195,18 +199,22 @@ fn decode_edit_owned(data: &[u8]) -> Result<Edit<'static>, DecodeError> {
         });
     }
     let mut properties = Vec::with_capacity(property_count);
+    let mut seen_props = FxHashSet::with_capacity_and_hasher(property_count, Default::default());
     for _ in 0..property_count {
         let id = reader.read_id("property_id")?;
+        if !seen_props.insert(id) {
+            return Err(DecodeError::DuplicateDictionaryEntry { dict: "properties", id });
+        }
         let dt_byte = reader.read_byte("data_type")?;
         let data_type = DataType::from_u8(dt_byte)
             .ok_or(DecodeError::InvalidDataType { data_type: dt_byte })?;
         properties.push((id, data_type));
     }
 
-    let relation_types = reader.read_id_vec(MAX_DICT_SIZE, "relation_types")?;
-    let languages = reader.read_id_vec(MAX_DICT_SIZE, "languages")?;
-    let units = reader.read_id_vec(MAX_DICT_SIZE, "units")?;
-    let objects = reader.read_id_vec(MAX_DICT_SIZE, "objects")?;
+    let relation_types = read_id_vec_no_duplicates(&mut reader, MAX_DICT_SIZE, "relation_types")?;
+    let languages = read_id_vec_no_duplicates(&mut reader, MAX_DICT_SIZE, "languages")?;
+    let units = read_id_vec_no_duplicates(&mut reader, MAX_DICT_SIZE, "units")?;
+    let objects = read_id_vec_no_duplicates(&mut reader, MAX_DICT_SIZE, "objects")?;
 
     let dicts = WireDictionaries {
         properties,
@@ -320,6 +328,35 @@ fn value_to_owned(v: crate::model::Value<'_>) -> crate::model::Value<'static> {
             data: Cow::Owned(data.into_owned()),
         },
     }
+}
+
+/// Reads an ID vector and checks for duplicates.
+fn read_id_vec_no_duplicates(
+    reader: &mut Reader<'_>,
+    max_len: usize,
+    field: &'static str,
+) -> Result<Vec<Id>, DecodeError> {
+    let count = reader.read_varint(field)? as usize;
+    if count > max_len {
+        return Err(DecodeError::LengthExceedsLimit {
+            field,
+            len: count,
+            max: max_len,
+        });
+    }
+
+    let mut ids = Vec::with_capacity(count);
+    let mut seen = FxHashSet::with_capacity_and_hasher(count, Default::default());
+
+    for _ in 0..count {
+        let id = reader.read_id(field)?;
+        if !seen.insert(id) {
+            return Err(DecodeError::DuplicateDictionaryEntry { dict: field, id });
+        }
+        ids.push(id);
+    }
+
+    Ok(ids)
 }
 
 fn decompress_zstd(compressed: &[u8]) -> Result<Vec<u8>, DecodeError> {
@@ -449,10 +486,16 @@ fn encode_edit_fast(edit: &Edit) -> Result<Vec<u8>, EncodeError> {
     Ok(writer.into_bytes())
 }
 
-/// Canonical two-pass encoding with sorted dictionaries.
+/// Canonical two-pass encoding with sorted dictionaries, authors, values, and unsets.
 ///
 /// Pass 1: Collect all dictionary entries
-/// Pass 2: Sort dictionaries, encode with stable indices
+/// Pass 2: Sort dictionaries, encode with stable indices and sorted values
+///
+/// Canonical mode requirements (spec Section 4.4):
+/// - Dictionaries sorted by ID bytes
+/// - Authors sorted by ID bytes, no duplicates
+/// - Values sorted by (propertyRef, languageRef), no duplicate (property, language)
+/// - Unset properties sorted by (propertyRef, language), no duplicates
 fn encode_edit_canonical(edit: &Edit) -> Result<Vec<u8>, EncodeError> {
     // Build property type map from CreateProperty ops
     let mut property_types: FxHashMap<Id, DataType> = FxHashMap::default();
@@ -472,10 +515,20 @@ fn encode_edit_canonical(edit: &Edit) -> Result<Vec<u8>, EncodeError> {
     // Sort dictionaries and get sorted builder
     let sorted_builder = dict_builder.into_sorted();
 
-    // Pass 2: Encode ops with sorted dictionary indices
+    // Sort authors by ID bytes and check for duplicates
+    let mut sorted_authors = edit.authors.clone();
+    sorted_authors.sort();
+    // Check for duplicate authors
+    for i in 1..sorted_authors.len() {
+        if sorted_authors[i] == sorted_authors[i - 1] {
+            return Err(EncodeError::DuplicateAuthor { id: sorted_authors[i] });
+        }
+    }
+
+    // Pass 2: Encode ops with sorted dictionary indices and sorted values
     let mut ops_writer = Writer::with_capacity(edit.ops.len() * 50);
     for op in &edit.ops {
-        encode_op(&mut ops_writer, op, &mut sorted_builder.clone(), &property_types)?;
+        encode_op_canonical(&mut ops_writer, op, &mut sorted_builder.clone(), &property_types)?;
     }
 
     // Assemble final output: header + dictionaries + ops
@@ -489,7 +542,7 @@ fn encode_edit_canonical(edit: &Edit) -> Result<Vec<u8>, EncodeError> {
     // Header
     writer.write_id(&edit.id);
     writer.write_string(&edit.name);
-    writer.write_id_vec(&edit.authors);
+    writer.write_id_vec(&sorted_authors);
     writer.write_signed_varint(edit.created_at);
 
     // Dictionaries (sorted)
@@ -500,6 +553,203 @@ fn encode_edit_canonical(edit: &Edit) -> Result<Vec<u8>, EncodeError> {
     writer.write_bytes(&ops_bytes);
 
     Ok(writer.into_bytes())
+}
+
+/// Encodes an op in canonical mode with sorted values.
+fn encode_op_canonical(
+    writer: &mut Writer,
+    op: &Op<'_>,
+    dict_builder: &mut DictionaryBuilder,
+    property_types: &FxHashMap<Id, DataType>,
+) -> Result<(), EncodeError> {
+    match op {
+        Op::CreateEntity(ce) => {
+            // Sort values by (property_index, language_index) and check for duplicates
+            let sorted_values = sort_and_check_values(&ce.values, dict_builder, property_types)?;
+
+            writer.write_byte(1); // OP_CREATE_ENTITY
+            writer.write_id(&ce.id);
+            writer.write_varint(sorted_values.len() as u64);
+
+            for pv in &sorted_values {
+                let data_type = property_types.get(&pv.property)
+                    .copied()
+                    .unwrap_or_else(|| pv.value.data_type());
+                encode_property_value_canonical(writer, pv, dict_builder, data_type)?;
+            }
+            Ok(())
+        }
+        Op::UpdateEntity(ue) => {
+            // Sort set_properties and unset_properties, check for duplicates
+            let sorted_set = sort_and_check_values(&ue.set_properties, dict_builder, property_types)?;
+            let sorted_unset = sort_and_check_unsets(&ue.unset_properties, dict_builder)?;
+
+            writer.write_byte(2); // OP_UPDATE_ENTITY
+            let id_index = dict_builder.add_object(ue.id);
+            writer.write_varint(id_index as u64);
+
+            let mut flags = 0u8;
+            if !sorted_set.is_empty() {
+                flags |= 0x01; // FLAG_HAS_SET_PROPERTIES
+            }
+            if !sorted_unset.is_empty() {
+                flags |= 0x02; // FLAG_HAS_UNSET_PROPERTIES
+            }
+            writer.write_byte(flags);
+
+            if !sorted_set.is_empty() {
+                writer.write_varint(sorted_set.len() as u64);
+                for pv in &sorted_set {
+                    let data_type = property_types.get(&pv.property)
+                        .copied()
+                        .unwrap_or_else(|| pv.value.data_type());
+                    encode_property_value_canonical(writer, pv, dict_builder, data_type)?;
+                }
+            }
+
+            if !sorted_unset.is_empty() {
+                writer.write_varint(sorted_unset.len() as u64);
+                for unset in &sorted_unset {
+                    use crate::model::UnsetLanguage;
+                    let idx = dict_builder.add_property(unset.property, DataType::Bool);
+                    writer.write_varint(idx as u64);
+                    let lang_value: u32 = match &unset.language {
+                        UnsetLanguage::All => 0xFFFFFFFF,
+                        UnsetLanguage::NonLinguistic => 0,
+                        UnsetLanguage::Specific(lang_id) => {
+                            dict_builder.add_language(Some(*lang_id)) as u32
+                        }
+                    };
+                    writer.write_varint(lang_value as u64);
+                }
+            }
+            Ok(())
+        }
+        // Other ops don't have values to sort, delegate to regular encode
+        _ => encode_op(writer, op, dict_builder, property_types),
+    }
+}
+
+/// Sorts values by (property_index, language_index) and checks for duplicates.
+fn sort_and_check_values<'a>(
+    values: &[crate::model::PropertyValue<'a>],
+    dict_builder: &DictionaryBuilder,
+    _property_types: &FxHashMap<Id, DataType>,
+) -> Result<Vec<crate::model::PropertyValue<'a>>, EncodeError> {
+    use crate::model::{PropertyValue, Value};
+
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Create (property_index, language_index, original_index) tuples for sorting
+    let mut indexed: Vec<(usize, usize, usize, &PropertyValue<'a>)> = values
+        .iter()
+        .enumerate()
+        .map(|(i, pv)| {
+            let prop_idx = dict_builder.get_property_index(&pv.property).unwrap_or(0);
+            let lang_idx = match &pv.value {
+                Value::Text { language, .. } => dict_builder.get_language_index(language.as_ref()).unwrap_or(0),
+                _ => 0,
+            };
+            (prop_idx, lang_idx, i, pv)
+        })
+        .collect();
+
+    // Sort by (property_index, language_index)
+    indexed.sort_by(|a, b| {
+        match a.0.cmp(&b.0) {
+            std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+            other => other,
+        }
+    });
+
+    // Check for duplicates (adjacent entries with same property_index and language_index)
+    for i in 1..indexed.len() {
+        if indexed[i].0 == indexed[i - 1].0 && indexed[i].1 == indexed[i - 1].1 {
+            let pv = indexed[i].3;
+            let language = match &pv.value {
+                Value::Text { language, .. } => *language,
+                _ => None,
+            };
+            return Err(EncodeError::DuplicateValue {
+                property: pv.property,
+                language,
+            });
+        }
+    }
+
+    // Return cloned values in sorted order
+    Ok(indexed.into_iter().map(|(_, _, _, pv)| pv.clone()).collect())
+}
+
+/// Sorts unset properties by (property_index, language) and checks for duplicates.
+fn sort_and_check_unsets(
+    unsets: &[crate::model::UnsetProperty],
+    dict_builder: &DictionaryBuilder,
+) -> Result<Vec<crate::model::UnsetProperty>, EncodeError> {
+    use crate::model::UnsetLanguage;
+
+    if unsets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Create (property_index, language_sort_key, original_index) tuples for sorting
+    // Language sort key: 0xFFFFFFFF for All, 0 for NonLinguistic, language_index for Specific
+    let mut indexed: Vec<(usize, u32, usize, &crate::model::UnsetProperty)> = unsets
+        .iter()
+        .enumerate()
+        .map(|(i, up)| {
+            let prop_idx = dict_builder.get_property_index(&up.property).unwrap_or(0);
+            let lang_key: u32 = match &up.language {
+                UnsetLanguage::All => 0xFFFFFFFF,
+                UnsetLanguage::NonLinguistic => 0,
+                UnsetLanguage::Specific(lang_id) => {
+                    dict_builder.get_language_index(Some(lang_id)).unwrap_or(0) as u32
+                }
+            };
+            (prop_idx, lang_key, i, up)
+        })
+        .collect();
+
+    // Sort by (property_index, language_key)
+    indexed.sort_by(|a, b| {
+        match a.0.cmp(&b.0) {
+            std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+            other => other,
+        }
+    });
+
+    // Check for duplicates
+    for i in 1..indexed.len() {
+        if indexed[i].0 == indexed[i - 1].0 && indexed[i].1 == indexed[i - 1].1 {
+            let up = indexed[i].3;
+            let language = match &up.language {
+                UnsetLanguage::All => None,
+                UnsetLanguage::NonLinguistic => None,
+                UnsetLanguage::Specific(id) => Some(*id),
+            };
+            return Err(EncodeError::DuplicateUnset {
+                property: up.property,
+                language,
+            });
+        }
+    }
+
+    Ok(indexed.into_iter().map(|(_, _, _, up)| up.clone()).collect())
+}
+
+/// Encodes a property value in canonical mode (same as regular but separated for clarity).
+fn encode_property_value_canonical(
+    writer: &mut Writer,
+    pv: &crate::model::PropertyValue<'_>,
+    dict_builder: &mut DictionaryBuilder,
+    data_type: DataType,
+) -> Result<(), EncodeError> {
+    let prop_index = dict_builder.add_property(pv.property, data_type);
+    writer.write_varint(prop_index as u64);
+    crate::codec::value::encode_value(writer, &pv.value, dict_builder)?;
+    Ok(())
 }
 
 /// Encodes an Edit with profiling output (two-pass for comparison).
@@ -818,5 +1068,159 @@ mod tests {
 
         assert_eq!(edit.id, decoded.id);
         assert_eq!(edit.name, decoded.name);
+    }
+
+    #[test]
+    fn test_canonical_rejects_duplicate_authors() {
+        let author1 = [1u8; 16];
+
+        let edit: Edit<'static> = Edit {
+            id: [0u8; 16],
+            name: Cow::Owned("Test".to_string()),
+            authors: vec![author1, author1], // Duplicate!
+            created_at: 0,
+            ops: vec![],
+        };
+
+        // Fast mode doesn't check duplicates
+        let result = encode_edit_with_options(&edit, EncodeOptions::new());
+        assert!(result.is_ok());
+
+        // Canonical mode rejects duplicates
+        let result = encode_edit_with_options(&edit, EncodeOptions::canonical());
+        assert!(matches!(result, Err(EncodeError::DuplicateAuthor { .. })));
+    }
+
+    #[test]
+    fn test_canonical_rejects_duplicate_values() {
+        let prop = [10u8; 16];
+
+        let edit: Edit<'static> = Edit {
+            id: [0u8; 16],
+            name: Cow::Owned("Test".to_string()),
+            authors: vec![],
+            created_at: 0,
+            ops: vec![
+                Op::CreateProperty(CreateProperty {
+                    id: prop,
+                    data_type: DataType::Text,
+                }),
+                Op::CreateEntity(CreateEntity {
+                    id: [1u8; 16],
+                    values: vec![
+                        PropertyValue {
+                            property: prop,
+                            value: Value::Text {
+                                value: Cow::Owned("First".to_string()),
+                                language: None,
+                            },
+                        },
+                        PropertyValue {
+                            property: prop,
+                            value: Value::Text {
+                                value: Cow::Owned("Second".to_string()),
+                                language: None,
+                            },
+                        },
+                    ],
+                }),
+            ],
+        };
+
+        // Canonical mode rejects duplicate (property, language) pairs
+        let result = encode_edit_with_options(&edit, EncodeOptions::canonical());
+        assert!(matches!(result, Err(EncodeError::DuplicateValue { .. })));
+    }
+
+    #[test]
+    fn test_canonical_allows_different_languages() {
+        let prop = [10u8; 16];
+        let lang_en = [20u8; 16];
+        let lang_es = [21u8; 16];
+
+        let edit: Edit<'static> = Edit {
+            id: [0u8; 16],
+            name: Cow::Owned("Test".to_string()),
+            authors: vec![],
+            created_at: 0,
+            ops: vec![
+                Op::CreateProperty(CreateProperty {
+                    id: prop,
+                    data_type: DataType::Text,
+                }),
+                Op::CreateEntity(CreateEntity {
+                    id: [1u8; 16],
+                    values: vec![
+                        PropertyValue {
+                            property: prop,
+                            value: Value::Text {
+                                value: Cow::Owned("Hello".to_string()),
+                                language: Some(lang_en),
+                            },
+                        },
+                        PropertyValue {
+                            property: prop,
+                            value: Value::Text {
+                                value: Cow::Owned("Hola".to_string()),
+                                language: Some(lang_es),
+                            },
+                        },
+                    ],
+                }),
+            ],
+        };
+
+        // Different languages for same property is allowed
+        let result = encode_edit_with_options(&edit, EncodeOptions::canonical());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_canonical_sorts_values_deterministically() {
+        let prop_a = [0x0A; 16];
+        let prop_b = [0x0B; 16];
+
+        // Values in reverse order (B before A)
+        let edit: Edit<'static> = Edit {
+            id: [1u8; 16],
+            name: Cow::Owned("Test".to_string()),
+            authors: vec![],
+            created_at: 0,
+            ops: vec![
+                Op::CreateProperty(CreateProperty {
+                    id: prop_a,
+                    data_type: DataType::Text,
+                }),
+                Op::CreateProperty(CreateProperty {
+                    id: prop_b,
+                    data_type: DataType::Int64,
+                }),
+                Op::CreateEntity(CreateEntity {
+                    id: [3u8; 16],
+                    values: vec![
+                        PropertyValue {
+                            property: prop_b, // B first
+                            value: Value::Int64 { value: 42, unit: None },
+                        },
+                        PropertyValue {
+                            property: prop_a, // A second
+                            value: Value::Text {
+                                value: Cow::Owned("Hello".to_string()),
+                                language: None,
+                            },
+                        },
+                    ],
+                }),
+            ],
+        };
+
+        // Encode twice - should produce identical bytes
+        let encoded1 = encode_edit_with_options(&edit, EncodeOptions::canonical()).unwrap();
+        let encoded2 = encode_edit_with_options(&edit, EncodeOptions::canonical()).unwrap();
+        assert_eq!(encoded1, encoded2, "Canonical encoding should be deterministic");
+
+        // Should roundtrip
+        let decoded = decode_edit(&encoded1).unwrap();
+        assert_eq!(decoded.ops.len(), 3);
     }
 }

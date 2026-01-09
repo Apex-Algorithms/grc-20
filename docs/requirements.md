@@ -99,6 +99,6 @@
 - **Deterministic relation ID computation** - Serializer does not verify unique-mode relation IDs
 - **Merge conflict resolution** - Serializer does not implement LWW or merge logic
 - **Network transport** - Serializer is bytes-in/bytes-out, not a network protocol
-- **Entity lifecycle validation** - Serializer does not check if entity is DEAD before accepting updates
+- **Entity lifecycle validation** - Serializer does not check if entity is DELETED before accepting updates
 - **Duplicate detection** - Serializer does not check if entity/relation already exists
 - **State lookups** - Serializer performs no database reads; validation is structural only (see spec Section 8)

@@ -64,25 +64,49 @@ pub struct UpdateEntity<'a> {
     pub unset_properties: Vec<UnsetProperty>,
 }
 
-/// Specifies a property to unset, optionally for a specific language (TEXT only).
+/// Specifies which language slot to clear for an UnsetProperty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsetLanguage {
+    /// Clear all language slots (wire format: 0xFFFFFFFF).
+    All,
+    /// Clear only the non-linguistic slot (wire format: 0).
+    NonLinguistic,
+    /// Clear a specific language slot (wire format: 1+).
+    Specific(Id),
+}
+
+impl Default for UnsetLanguage {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+/// Specifies a property to unset, with optional language targeting (TEXT only).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UnsetProperty {
     /// The property to clear.
     pub property: Id,
-    /// For TEXT properties: if Some, clear only that language; if None, clear all languages.
-    /// For non-TEXT properties: must be None.
-    pub language: Option<Id>,
+    /// Which language slot(s) to clear.
+    /// For TEXT properties: All clears all slots, NonLinguistic clears non-linguistic slot,
+    ///   Specific clears a specific language slot.
+    /// For non-TEXT properties: must be All.
+    pub language: UnsetLanguage,
 }
 
 impl UnsetProperty {
     /// Creates an UnsetProperty that clears all values for a property.
     pub fn all(property: Id) -> Self {
-        Self { property, language: None }
+        Self { property, language: UnsetLanguage::All }
+    }
+
+    /// Creates an UnsetProperty that clears the non-linguistic slot for a TEXT property.
+    pub fn non_linguistic(property: Id) -> Self {
+        Self { property, language: UnsetLanguage::NonLinguistic }
     }
 
     /// Creates an UnsetProperty that clears a specific language for a TEXT property.
     pub fn language(property: Id, language: Id) -> Self {
-        Self { property, language: Some(language) }
+        Self { property, language: UnsetLanguage::Specific(language) }
     }
 }
 
@@ -237,9 +261,13 @@ pub struct CreateProperty {
 /// Validates a position string according to spec rules.
 ///
 /// Position strings must:
+/// - Not be empty
 /// - Only contain characters 0-9, A-Z, a-z (62 chars, ASCII order)
 /// - Not exceed 64 characters
 pub fn validate_position(pos: &str) -> Result<(), &'static str> {
+    if pos.is_empty() {
+        return Err("position cannot be empty");
+    }
     if pos.len() > 64 {
         return Err("position exceeds 64 characters");
     }
@@ -273,8 +301,10 @@ mod tests {
     fn test_validate_position() {
         assert!(validate_position("abc123").is_ok());
         assert!(validate_position("aV").is_ok());
-        assert!(validate_position("").is_ok());
         assert!(validate_position("a").is_ok());
+
+        // Empty is not allowed
+        assert!(validate_position("").is_err());
 
         // Invalid characters
         assert!(validate_position("abc-123").is_err());

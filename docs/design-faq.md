@@ -508,8 +508,8 @@ Timeline:
   T6: UpdateEntity(id: 123, name: "Bob")   -- After tombstone
 
 Resolution at query time:
-  - Entity 123 has status: DEAD
-  - Update at T6 is ignored (no undelete flag)
+  - Entity 123 has status: DELETED
+  - Update at T6 is ignored (tombstone dominance)
   - History is preserved: auditors can see all ops
 ```
 
@@ -591,7 +591,7 @@ This creates an entity that exists but contains nothing—a state with no clear 
 
 | Consequence | Description |
 |-------------|-------------|
-| **Persistent graph presence** | The entity remains ALIVE and appears in traversals |
+| **Persistent graph presence** | The entity remains ACTIVE and appears in traversals |
 | **Empty results in queries** | `MATCH (p:Person)-[:WORKS_AT]->(c:Company)` returns property-less nodes |
 | **Defensive query patterns** | Every query requires `WHERE n.name IS NOT NULL` filters |
 | **Ambiguous semantics** | Cannot distinguish "data unknown" from "entity removed" |
@@ -625,10 +625,10 @@ DeleteEntity enables representation of real-world state transitions:
 Delete is an append-only operation like any other—it records a lifecycle event:
 
 ```
-CreateEntity: ∅ → ALIVE
-DeleteEntity: ALIVE → DEAD
+CreateEntity: ∅ → ACTIVE
+DeleteEntity: ACTIVE → DELETED
 ```
 
-The DEAD state instructs indexers to exclude the entity from standard queries while preserving history for audit and potential recovery.
+The DELETED state instructs indexers to exclude the entity from standard queries while preserving history for audit and potential recovery.
 
 **Summary:** A lifecycle model requires both creation and termination states. DeleteEntity provides the termination primitive that clearing properties cannot express.

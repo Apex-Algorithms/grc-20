@@ -123,6 +123,9 @@ pub enum DecodeError {
 
     #[error("[E005] decompressed size {actual} doesn't match declared {declared}")]
     UncompressedSizeMismatch { declared: usize, actual: usize },
+
+    #[error("[E005] duplicate ID in {dict} dictionary: {id:?}")]
+    DuplicateDictionaryEntry { dict: &'static str, id: Id },
 }
 
 impl DecodeError {
@@ -185,6 +188,15 @@ pub enum EncodeError {
 
     #[error("invalid input: {context}")]
     InvalidInput { context: &'static str },
+
+    #[error("duplicate author ID in canonical mode: {id:?}")]
+    DuplicateAuthor { id: Id },
+
+    #[error("duplicate value (property={property:?}, language={language:?}) in canonical mode")]
+    DuplicateValue { property: Id, language: Option<Id> },
+
+    #[error("duplicate unset property (property={property:?}, language={language:?}) in canonical mode")]
+    DuplicateUnset { property: Id, language: Option<Id> },
 }
 
 /// Error during semantic validation.

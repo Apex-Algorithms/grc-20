@@ -1,7 +1,7 @@
 # GRC-20 v2 Specification
 
 **Status:** Draft
-**Version:** 0.18.0
+**Version:** 0.19.0
 
 ## 1. Introduction
 
@@ -20,7 +20,7 @@ GRC-20 v2 is a binary property graph format for decentralized knowledge networks
 | Term | Definition |
 |------|------------|
 | Entity | A node in the graph, identified by ID |
-| Relation | A directed edge between objects, identified by ID |
+| Relation | A directed edge between entities, identified by ID |
 | Object | Either an Entity or Relation (used when referencing both) |
 | Property | A named, typed attribute definition |
 | Value | A property instance on an object |
@@ -41,6 +41,8 @@ All identifiers are RFC 4122 UUIDs.
 ID := UUID (16 bytes)
 ```
 
+**Byte order (NORMATIVE):** UUID bytes are encoded in network byte order (big-endian), matching the canonical hex representation. Byte `i` corresponds to hex digits `2i` and `2i+1` of the standard 32-character hex string. For example, UUID `550e8400-e29b-41d4-a716-446655440000` is encoded as bytes `[0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, ...]`. This applies everywhere UUIDs appear: dictionary entries, inline IDs, derived ID inputs, and sorting comparisons.
+
 **Random IDs:** Use UUIDv4 (random) or UUIDv7 (time-ordered). UUIDv7 is RECOMMENDED for entities and relations as it enables time-based sorting.
 
 **Derived IDs:** Content-addressed IDs use UUIDv8 with SHA-256:
@@ -52,6 +54,8 @@ derived_uuid(input_bytes) -> UUID:
   hash[8] = (hash[8] & 0x3F) | 0x80  // RFC 4122 variant
   return hash
 ```
+
+When deriving from string prefixes (e.g., `"grc20:relation-entity:"`), the string is UTF-8 encoded with no trailing NUL byte.
 
 **Display format:** Non-hyphenated lowercase hex is RECOMMENDED. Implementations MAY accept hyphenated or Base58 on input.
 
@@ -71,8 +75,8 @@ Values are unique per (entityId, propertyId), or per (entityId, propertyId, lang
 Type membership is expressed via `Types` relations (Section 7.3), not a dedicated types field.
 
 **Lifecycle states:**
-- `ALIVE` — Entity exists and accepts updates
-- `DEAD` — Entity is tombstoned; subsequent updates are ignored
+- `ACTIVE` — Entity exists and accepts updates
+- `DELETED` — Entity is tombstoned; subsequent updates are ignored
 
 ### 2.3 Types
 
@@ -147,20 +151,44 @@ Applications needing to preserve precision (e.g., "12.30" vs "12.3") should stor
 
 #### DATE
 
-ISO 8601 format for **calendar dates with variable precision**. Use DATE for semantic dates where precision matters (historical events, birthdays, publication years). Use TIMESTAMP for exact instants.
+Calendar dates with variable precision using the **proleptic Gregorian calendar**. Use DATE for semantic dates where precision matters (historical events, birthdays, publication years). Use TIMESTAMP for exact instants.
 
 ```
-"2024-03-15"         // Date only
+"2024-03-15"         // Day precision
 "2024-03"            // Month precision
 "2024"               // Year only
-"-0100"              // 100 BCE
+"-0100"              // 100 BCE (astronomical year -100)
 ```
+
+**Grammar (NORMATIVE):**
+```abnf
+date        = year / year-month / year-month-day
+year        = [sign] 4DIGIT
+year-month  = [sign] 4DIGIT "-" 2DIGIT
+year-month-day = [sign] 4DIGIT "-" 2DIGIT "-" 2DIGIT
+sign        = "+" / "-"
+```
+
+Week dates (`2024-W01`) and ordinal dates (`2024-001`) are NOT supported.
+
+**Calendar basis (NORMATIVE):** All dates use the proleptic Gregorian calendar (Gregorian rules extended backwards before 1582).
+
+**Year numbering (NORMATIVE):** Years use astronomical year numbering where year 0 exists:
+- Year `0001` = 1 CE
+- Year `0000` = 1 BCE
+- Year `-0001` = 2 BCE
+- Year `-0100` = 101 BCE
+
+This follows ISO 8601 extended year format. Note: historical "BCE" numbering has no year zero, so BCE year N = astronomical year -(N-1).
 
 **DATE vs TIMESTAMP:** DATE preserves the original precision and is stored as a string. TIMESTAMP is always microsecond-precision UTC stored as an integer. A birthday is a DATE ("1990-05-20"); a login event is a TIMESTAMP.
 
-**Sorting (NORMATIVE):** Indexers MUST parse DATE strings into a numeric representation for sorting. Lexicographical string sorting does NOT work for BCE years. Dates with different precisions sort by their earliest possible instant; when two dates resolve to the same instant, the more precise date sorts before the less precise (e.g., `2024-01-01` < `2024-01` < `2024`).
+**Sorting (NORMATIVE):** Indexers MUST parse DATE strings into a numeric representation for sorting. Lexicographical string sorting does NOT work for BCE years. Dates sort by their earliest possible UTC instant on the proleptic Gregorian calendar; when two dates resolve to the same instant, the more precise date sorts first (e.g., `2024-01-01` < `2024-01` < `2024`). Tie-break by byte comparison of the original string if instants and precisions are equal.
 
-**Validation (NORMATIVE):** DATE strings MUST conform to ISO 8601 calendar date format. Full datetime with timezone (e.g., "2024-03-15T14:30Z") SHOULD use TIMESTAMP instead. Implementations SHOULD reject clearly malformed dates (e.g., month 13, day 32) but MAY defer full validation to the application layer.
+**Validation (NORMATIVE):** DATE strings MUST conform to the grammar above. Full datetime with timezone (e.g., "2024-03-15T14:30Z") SHOULD use TIMESTAMP instead. Implementations MUST reject:
+- Month outside 01-12
+- Day outside valid range for the month (considering leap years)
+- Malformed structure (wrong separators, wrong digit counts)
 
 #### POINT
 
@@ -243,6 +271,8 @@ Relation {
 }
 ```
 
+**Endpoint constraint (NORMATIVE):** The `from` and `to` fields MUST reference entities, not relations. To create a meta-edge (a relation that references another relation), target the other relation's reified entity via its `entity` ID.
+
 The `entity` field links to an entity that represents this relation as a node. This enables relations to be referenced by other relations (meta-edges) and to participate in the graph as first-class nodes. Values are stored on the reified entity, not on the relation itself.
 
 **Reified entity creation (NORMATIVE):** CreateRelation implicitly creates the reified entity if it does not exist. No separate CreateEntity op is required. If an entity with the given ID already exists, it is reused—its existing values are preserved and it becomes associated with this relation.
@@ -291,7 +321,13 @@ midpoint("a", "b") = "aV"
 
 **Maximum length (NORMATIVE):** Position strings MUST NOT exceed 64 characters. If a client cannot generate a midpoint without exceeding this limit (positions too close), it MUST perform explicit reordering by issuing `UpdateRelation` ops with new, evenly-spaced positions. This protocol does not support implicit rebalancing.
 
-**Position validation (NORMATIVE):** Positions containing characters outside `0-9A-Za-z` or exceeding 64 characters MUST be rejected (E005).
+**Position validation (NORMATIVE):** Positions containing characters outside `0-9A-Za-z` or exceeding 64 characters MUST be rejected (E005). Empty position strings are NOT permitted.
+
+**Ordering semantics (NORMATIVE):**
+1. Relations with a `position` sort before relations without a position.
+2. Positions compare lexicographically using ASCII byte order over `0-9A-Za-z` (i.e., `0` < `9` < `A` < `Z` < `a` < `z`).
+3. If positions are equal, tie-break by relation ID bytes (lexicographic unsigned comparison).
+4. Relations without positions are ordered by relation ID bytes.
 
 **Immutability (NORMATIVE):** The structural fields (`entity`, `type`, `from`, `to`) are immutable after creation. To change endpoints, delete and recreate.
 
@@ -300,10 +336,22 @@ midpoint("a", "b") = "aV"
 **NORMATIVE:** Resolved state is scoped to a space:
 
 ```
-state(space_id, object_id) → Object | DEAD | NOT_FOUND
+state(space_id, object_id) → Object | DELETED | NOT_FOUND
 ```
 
 The same object ID can have different state in different spaces. Multi-space views are computed by resolver policy and MUST preserve provenance.
+
+**Object ID namespace (NORMATIVE):** Entity IDs and Relation IDs share a single namespace within each space. A given UUID identifies exactly one kind of object:
+
+| Scenario | Resolution |
+|----------|------------|
+| CreateEntity where Relation with same ID exists | Ignored (ID already in use) |
+| CreateRelation where Entity with same ID exists | Ignored (ID already in use) |
+| CreateRelation with explicit `entity` that equals `relation.id` | Invalid; `entity` MUST differ from the relation ID |
+
+The auto-derived entity ID (`derived_uuid("grc20:relation-entity:" || relation_id)`) is guaranteed to differ from the relation ID due to the prefix, so this constraint only applies to explicit `entity` values in many-mode.
+
+**Rationale:** A single namespace simplifies the state model and prevents ambiguity in `state()` lookups. Reified entities are distinct objects that happen to represent relations as nodes.
 
 ### 2.8 Schema Constraints
 
@@ -323,10 +371,12 @@ Op {
     CreateEntity     = 1
     UpdateEntity     = 2
     DeleteEntity     = 3
-    CreateRelation   = 4
-    UpdateRelation   = 5
-    DeleteRelation   = 6
-    CreateProperty   = 7
+    RestoreEntity    = 4
+    CreateRelation   = 5
+    UpdateRelation   = 6
+    DeleteRelation   = 7
+    RestoreRelation  = 8
+    CreateProperty   = 9
   }
 }
 ```
@@ -355,7 +405,7 @@ UpdateEntity {
 
 UnsetProperty {
   property: ID | index
-  language: ID?    // TEXT only: if present, clear only that language; if absent, clear all
+  language: uint32    // 0xFFFFFFFF = clear all, 0 = non-linguistic, 1+ = specific language
 }
 ```
 
@@ -366,7 +416,7 @@ UnsetProperty {
 
 **`set_properties` semantics (NORMATIVE):** For a given property (and language, for TEXT), `set_properties` replaces the existing value. For TEXT values, each language is treated independently—setting a value for one language does not affect values in other languages.
 
-**`unset_properties` semantics (NORMATIVE):** Clears values for properties. For TEXT properties, if `language` is specified, only that language slot is cleared; if `language` is absent, all language slots for that property are cleared. For non-TEXT properties, `language` must be absent and the single value is cleared.
+**`unset_properties` semantics (NORMATIVE):** Clears values for properties. For TEXT properties, the `language` field specifies which slot to clear: `0xFFFFFFFF` clears all language slots, `0` clears the non-linguistic slot, and `1+` clears a specific language slot. For non-TEXT properties, `language` MUST be `0xFFFFFFFF` (clear all) and the single value is cleared.
 
 **Application order within op (NORMATIVE):**
 1. `unset_properties`
@@ -422,6 +472,10 @@ CreateRelation {
 ```
 
 **Semantics (NORMATIVE):** If the relation does not exist, create it along with its reified entity (if that entity does not already exist). If the relation already exists with the same ID, the op is ignored (relations are immutable except for position). To add values to the relation, use UpdateEntity on the reified entity ID.
+
+**Tombstone interactions (NORMATIVE):**
+- If the relation ID exists but is DELETED, CreateRelation is ignored (tombstone absorbs; use RestoreRelation to revive).
+- If the reified entity ID exists but is DELETED, the relation is still created, but the reified entity remains DELETED. Values cannot be added to the relation until the entity is restored via RestoreEntity. This is an edge case that occurs when an entity is explicitly deleted after being used as a reified entity, or when the same ID is reused.
 
 **Entity ID resolution:**
 - If `entity` is absent: `entity_id = derived_uuid("grc20:relation-entity:" || relation_id)`
@@ -491,7 +545,7 @@ Types are entities created via CreateEntity. Type names and metadata are added a
 
 Operations are validated **structurally** at write time and **semantically** at read time.
 
-**Write-time:** Validate structure, append to log. No state lookups.
+**Write-time:** Validate structure, append to log. No state lookups required except for DataType consistency checks (Section 8.1), which require knowledge of previously-established property DataTypes. Indexers SHOULD maintain a property ID → DataType index for efficient validation.
 
 **Read-time:** Replay operations in log order, apply resolution rules, return computed state.
 
@@ -500,7 +554,7 @@ Operations are validated **structurally** at write time and **semantically** at 
 1. Replay ops in log order (Section 4.2)
 2. Apply merge rules (Section 4.2.1)
 3. Tombstone dominance: updates after delete are ignored
-4. Return resolved state or DEAD status
+4. Return resolved state or DELETED status
 
 ---
 
@@ -534,7 +588,10 @@ Edits are standalone patches. They contain no parent references—ordering is pr
 - **Fast mode (default):** Dictionary order is implementation-defined. Optimized for encode speed.
 - **Canonical mode:** Deterministic encoding for reproducible bytes. Required for signing and content deduplication.
 
-Content-addressing (CID) is based on the bytes actually produced by the encoder. For reproducible CIDs across implementations, use canonical mode.
+**Content addressing (NORMATIVE):** CIDs and signatures MUST be computed over **uncompressed** canonical-mode bytes (the `GRC2` payload). Compression is a transport optimization and is not part of the signed/hashed content. This ensures:
+- Different zstd implementations/settings don't cause CID divergence
+- Signatures remain valid regardless of transport compression
+- Decompressed content can be verified against the original CID
 
 ### 4.2 Sequential Ordering
 
@@ -595,7 +652,7 @@ The property dictionary includes both ID and DataType. This allows values to omi
 
 **Relation type dictionary requirement (NORMATIVE):** All relation types referenced in an edit MUST be declared in the `relation_type_ids` dictionary.
 
-**Language dictionary requirement (NORMATIVE):** All non-default languages referenced in TEXT values MUST be declared in the `language_ids` dictionary. Language index 0 means default (no entry required); indices 1+ reference `language_ids[index-1]`. Only TEXT values have the language field.
+**Language dictionary requirement (NORMATIVE):** All languages referenced in TEXT values MUST be declared in the `language_ids` dictionary. Language index 0 means non-linguistic (language-agnostic content; no entry required); indices 1+ reference `language_ids[index-1]`. Only TEXT values have the language field. To store linguistic text (including English), the appropriate language ID must be in the dictionary.
 
 **Unit dictionary requirement (NORMATIVE):** All units referenced in numerical values (INT64, FLOAT64, DECIMAL) MUST be declared in the `unit_ids` dictionary. Unit index 0 means no unit; indices 1+ reference `unit_ids[index-1]`. Only numerical values have the unit field.
 
@@ -622,11 +679,19 @@ Canonical encoding produces deterministic bytes for the same logical edit. Use c
 
 1. **Sorted dictionaries:** All dictionaries (`properties`, `relation_type_ids`, `language_ids`, `unit_ids`, `object_ids`) MUST be sorted by ID bytes in ascending lexicographic order (unsigned byte comparison).
 
-2. **Minimal varints:** Varints MUST use the minimum number of bytes required. Overlong encodings (e.g., encoding 1 as `81 00` instead of `01`) are invalid.
+2. **Sorted authors:** The `authors` list MUST be sorted by ID bytes in ascending lexicographic order. Duplicate author IDs are NOT permitted.
 
-3. **Consistent field encoding:** Optional fields use presence flags as specified in Section 6. No additional padding or alignment bytes.
+3. **Sorted value lists:** `CreateEntity.values` and `UpdateEntity.set_properties` MUST be sorted by `(propertyRef, languageRef)` in ascending order (property index first, then language index). Duplicate `(property, language)` entries are NOT permitted.
 
-**Performance note:** Canonical encoding requires sorting dictionaries after collection, which is substantially slower than fast mode. Implementations SHOULD offer both modes.
+4. **Sorted unset lists:** `UpdateEntity.unset_properties` MUST be sorted by `(propertyRef, language)` in ascending order. Duplicate entries (same property and language) are NOT permitted.
+
+5. **Minimal varints:** (Note: This is now a general requirement per Section 6.1, not canonical-only.)
+
+6. **Consistent field encoding:** Optional fields use presence flags as specified in Section 6. No additional padding or alignment bytes.
+
+7. **No duplicate dictionary entries:** Each dictionary MUST NOT contain duplicate IDs. Edits with duplicate IDs in any dictionary MUST be rejected.
+
+**Performance note:** Canonical encoding requires sorting dictionaries and authors after collection, which is substantially slower than fast mode. Implementations SHOULD offer both modes.
 
 ### 4.5 Edit Publishing
 
@@ -674,6 +739,8 @@ Relation {
 128-16383:   2 bytes  [1xxxxxxx 0xxxxxxx]
 ```
 
+**Varint bounds (NORMATIVE):** Varints MUST NOT exceed 10 bytes (sufficient for u64). Varints MUST use minimal encoding—the fewest bytes required to represent the value. Overlong encodings (e.g., encoding 1 as `81 00` instead of `01`) MUST be rejected (E005). This applies to all varints, not just canonical mode.
+
 **Signed varint:** ZigZag encoding then varint
 ```
 zigzag(n) = (n << 1) ^ (n >> 63)
@@ -701,7 +768,7 @@ index: varint    // Must be < relation_type_count
 
 **LanguageRef:**
 ```
-index: varint    // 0 = default (no language), 1+ = language_ids[index-1]
+index: varint    // 0 = non-linguistic, 1+ = language_ids[index-1]
 ```
 
 **UnitRef:**
@@ -790,7 +857,7 @@ flags: uint8
 
 UnsetProperty:
   property: PropertyRef
-  language: LanguageRef    // 0 = clear all, 1+ = clear specific language (TEXT only)
+  language: varint    // 0xFFFFFFFF = clear all languages, otherwise LanguageRef (0 = non-linguistic, 1+ = specific language)
 ```
 
 **DeleteEntity:**
@@ -865,7 +932,7 @@ Value:
 
 The payload type is determined by the property's DataType (from the properties dictionary).
 
-**Language (TEXT only):** The `language` field is only present for TEXT values. A value with `language = 0` is the default (unlocalized or English). Values with different languages for the same property are distinct and can coexist.
+**Language (TEXT only):** The `language` field is only present for TEXT values. A value with `language = 0` is non-linguistic (language-agnostic content such as URLs, identifiers, codes, or formulas). Values with different languages for the same property are distinct and can coexist. To store English text, use the well-known English language ID (Section 7.4).
 
 **Unit (numerical types only):** The `unit` field is only present for INT64, FLOAT64, and DECIMAL values. A value with `unit = 0` has no unit. Unlike language, unit does NOT affect value uniqueness—it is metadata for interpretation only.
 
@@ -901,13 +968,15 @@ Embedding:
 
 ### 6.6 Compression
 
-Edits SHOULD be compressed with zstd level 3+.
+Edits SHOULD be compressed with zstd for transport efficiency.
 
 ```
 Magic: "GRC2Z" (5 bytes)
 uncompressed_size: varint
 compressed_data: zstd frame
 ```
+
+**Compression is a transport wrapper (NORMATIVE):** The `GRC2Z` format wraps the uncompressed `GRC2` payload. CIDs and signatures are computed over the uncompressed payload, not the compressed bytes (see Section 4.1). Implementations MAY use any zstd compression level; level 3+ is RECOMMENDED for a good size/speed tradeoff.
 
 ---
 
@@ -937,12 +1006,29 @@ The Genesis Space provides well-known IDs for universal concepts. These are the 
 
 ### 7.4 Language IDs
 
-Language entities for localized TEXT values. IDs are derived:
+Language entities for localized TEXT values. IDs are derived using BCP 47 language tags in lowercase with hyphen separators:
 ```
-id = derived_uuid("grc20:genesis:language:" + iso_code)
+id = derived_uuid("grc20:genesis:language:" + bcp47_tag)
 ```
 
-Example: English (en) = `derived_uuid("grc20:genesis:language:en")`
+**Well-known language IDs:**
+
+| Language | BCP 47 | Derivation |
+|----------|--------|------------|
+| English | en | `derived_uuid("grc20:genesis:language:en")` |
+| Spanish | es | `derived_uuid("grc20:genesis:language:es")` |
+| Chinese (Simplified) | zh-hans | `derived_uuid("grc20:genesis:language:zh-hans")` |
+| Chinese (Traditional) | zh-hant | `derived_uuid("grc20:genesis:language:zh-hant")` |
+| Arabic | ar | `derived_uuid("grc20:genesis:language:ar")` |
+| Hindi | hi | `derived_uuid("grc20:genesis:language:hi")` |
+| Portuguese | pt | `derived_uuid("grc20:genesis:language:pt")` |
+| Russian | ru | `derived_uuid("grc20:genesis:language:ru")` |
+| Japanese | ja | `derived_uuid("grc20:genesis:language:ja")` |
+| French | fr | `derived_uuid("grc20:genesis:language:fr")` |
+| German | de | `derived_uuid("grc20:genesis:language:de")` |
+| Korean | ko | `derived_uuid("grc20:genesis:language:ko")` |
+
+**Canonicalization (NORMATIVE):** Language tags MUST be normalized to lowercase before derivation. For example, `"EN"`, `"En"`, and `"en"` all derive the same ID using `"en"`.
 
 ---
 
@@ -959,23 +1045,46 @@ Indexers MUST reject edits that fail structural validation:
 | Lengths | Truncated/overflow |
 | Dictionary counts | Greater than 0xFFFFFFFE |
 | Reference indices | Index ≥ respective dictionary count |
-| Language indices (TEXT) | Index > 0 and (index - 1) ≥ language_count |
+| Dictionary duplicates | Same ID appears twice in any dictionary |
+| Author duplicates | Same author ID appears twice (canonical mode) |
+| Value duplicates | Same `(property, language)` appears twice in values/set_properties (canonical mode) |
+| Unset duplicates | Same `(property, language)` appears twice in unset_properties (canonical mode) |
+| Language indices (TEXT) | Index not 0xFFFFFFFF and index > 0 and (index - 1) ≥ language_count |
+| UnsetProperty language (non-TEXT) | Language value is not 0xFFFFFFFF |
 | Unit indices (numerical) | Index > 0 and (index - 1) ≥ unit_count |
 | UTF-8 | Invalid encoding |
+| Varint encoding | Overlong encoding or exceeds 10 bytes |
 | Reserved bits | Non-zero |
 | Mantissa bytes | Non-minimal encoding |
 | DECIMAL normalization | Mantissa has trailing zeros, or zero not encoded as {0,0} |
 | Signatures | Invalid (if governance requires) |
 | BOOL values | Not 0x00 or 0x01 |
 | POINT bounds | Latitude outside [-90, +90] or longitude outside [-180, +180] |
-| Position strings | Characters outside `0-9A-Za-z` or length > 64 |
+| DATE format | Does not match grammar, invalid month (>12), invalid day for month |
+| Position strings | Empty, characters outside `0-9A-Za-z`, or length > 64 |
 | EMBEDDING dims | Data length doesn't match dims × bytes-per-element for subtype |
 | Zstd decompression | Decompressed size doesn't match declared `uncompressed_size` |
 | DataType consistency | Edit dictionary declares DataType different from established schema |
 | Float values | NaN payload (see float rules in Section 2.5) |
 | Unique mode entity | CreateRelation has mode=0 (unique) and has_entity=1 |
+| Relation entity self-reference | CreateRelation has explicit `entity` equal to relation ID |
 
 **Implementation-defined limits:** This specification does not mandate limits on ops per edit, values per entity, or TEXT/BYTES payload sizes. Implementations and governance systems MAY impose their own limits to prevent resource exhaustion.
+
+**Security guidance (RECOMMENDED):** Decoders process untrusted input and SHOULD enforce defensive limits:
+
+| Resource | Recommended Limit | Rationale |
+|----------|-------------------|-----------|
+| `uncompressed_size` (zstd) | ≤ 64 MiB | Prevent memory exhaustion |
+| Compression ratio | ≤ 100:1 | Detect compression bombs |
+| Dictionary counts | ≤ 100,000 each | Prevent allocation attacks |
+| Ops per edit | ≤ 1,000,000 | Bound processing time |
+| String/bytes length | ≤ 16 MiB | Prevent single-value DoS |
+| Embedding dimensions | ≤ 65,536 | Practical vector limits |
+
+Decoders SHOULD reject zstd frames with trailing data after decompression.
+
+**Derived ID pre-creation:** Because relation entity IDs are derived deterministically (`derived_uuid("grc20:relation-entity:" || relation_id)`), an attacker can pre-create an entity with that ID and set values before the relation exists. When the relation is later created, it adopts the existing entity with its values. This is known behavior, not a vulnerability—applications concerned about this can verify entity provenance at a higher layer.
 
 **Authentication and authorization:** Signature schemes, key management, and authorization rules are defined by space governance, not this specification. The `authors` field is metadata; how it maps to cryptographic identities and what signatures are required (if any) is determined by the governance layer. Error code E003 is reserved for signature validation failures when governance requires signatures.
 
@@ -988,16 +1097,25 @@ Indexers MUST reject edits that fail structural validation:
 | Concurrent edits | LWW by OpPosition |
 | Out-of-order arrival | Buffer until ordered position known |
 
-**Operations on non-existent objects (NORMATIVE):**
+**Operations on non-existent or deleted objects (NORMATIVE):**
 
 | Operation | Target State | Resolution |
 |-----------|--------------|------------|
 | UpdateEntity | NOT_FOUND | Ignored (no implicit create) |
-| UpdateEntity | DEAD | Ignored (tombstone dominance) |
+| UpdateEntity | DELETED | Ignored (tombstone dominance) |
 | DeleteEntity | NOT_FOUND | Ignored (idempotent) |
-| DeleteEntity | DEAD | Ignored (idempotent) |
+| DeleteEntity | DELETED | Ignored (idempotent) |
+| CreateEntity | DELETED | Ignored (tombstone absorbs upserts) |
+| UpdateRelation | NOT_FOUND | Ignored |
+| UpdateRelation | DELETED | Ignored (tombstone dominance) |
+| DeleteRelation | NOT_FOUND | Ignored (idempotent) |
+| DeleteRelation | DELETED | Ignored (idempotent) |
+| CreateRelation | Relation DELETED | Ignored (tombstone absorbs) |
+| CreateRelation | Reified entity DELETED | Relation created, but entity stays DELETED |
 | CreateRelation | Endpoint NOT_FOUND | Relation created (dangling reference allowed) |
-| CreateRelation | Endpoint DEAD | Relation created (dangling reference allowed) |
+| CreateRelation | Endpoint DELETED | Relation created (dangling reference allowed) |
+| CreateEntity | Relation with same ID exists | Ignored (namespace collision) |
+| CreateRelation | Entity with same ID exists | Ignored (namespace collision) |
 
 Dangling references are permitted to support cross-space links and out-of-order edit arrival. Applications MAY enforce referential integrity at a higher layer.
 

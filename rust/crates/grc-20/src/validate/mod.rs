@@ -39,7 +39,7 @@ impl SchemaContext {
 /// - Value types match property data types
 /// - DataType declarations are consistent with existing schema
 ///
-/// Note: Entity lifecycle (DEAD/ALIVE) validation requires state context
+/// Note: Entity lifecycle (DELETED/ACTIVE) validation requires state context
 /// and is not performed here.
 pub fn validate_edit(edit: &Edit, schema: &SchemaContext) -> Result<(), ValidationError> {
     // Build a local schema from CreateProperty ops in this edit

@@ -34,7 +34,7 @@ Build a production-quality binary serializer for GRC-20 v2 edits that:
 
 **Semantic (separate module, requires context):**
 - Value types match property `data_type`
-- Entity lifecycle (no updates to DEAD entities)
+- Entity lifecycle (no updates to DELETED entities)
 
 **Explicitly NOT validated:**
 - Relation targets exist (cross-space references are valid)
