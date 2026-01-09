@@ -66,7 +66,7 @@ Entity {
 }
 ```
 
-An entity can have multiple values for the same property.
+Values are unique per (entityId, propertyId), or per (entityId, propertyId, language) for TEXT values. When multiple values for a given (entity, property) pair are required, use relations instead.
 
 Type membership is expressed via `Types` relations (Section 7.3), not a dedicated types field.
 
@@ -218,51 +218,22 @@ A value is a property instance on an object:
 Value {
   property: index
   value: bytes
+  language: ID?    // TEXT only: language entity reference
+  unit: ID?        // INT64, FLOAT64, DECIMAL only: unit entity reference
 }
 ```
 
 The value's type is determined by the property's `data_type`.
 
-**Multi-value semantics:**
+**Value uniqueness:**
 
-An object can have multiple values for the same property (set semantics). Values are unordered; use relations with positions for ordered collections.
+Values are unique per (entityId, propertyId), with TEXT values additionally differentiated by language. Setting a value replaces any existing value for that (property, language) combination. For ordered or multiple values, use relations with positions.
 
-**Value identity:**
-
-Values are identified by a hash of their canonical content:
-
-```
-// For TEXT values:
-value_id = SHA-256(property_id || canonical_payload || language_id)[0:16]
-
-// For all other DataTypes:
-value_id = SHA-256(property_id || canonical_payload)[0:16]
-```
-
-Where `language_id` is the 16-byte UUID of the language entity, or 16 zero bytes if `language = 0` (default).
-
-Same property + same payload (+ same language for TEXT) = same `value_id`. Adding the same value twice is idempotent. TEXT values with different languages have different identities and coexist.
-
-**Canonical payload (NORMATIVE):** The `canonical_payload` is the logical value, not the wire encoding. This ensures `value_id` is stable across edits regardless of dictionary indices.
-
-| DataType | Canonical Payload |
-|----------|-------------------|
-| BOOL | 1 byte: 0x00 or 0x01 |
-| INT64 | 8 bytes, little-endian signed |
-| FLOAT64 | 8 bytes, IEEE 754 little-endian (see float rules below) |
-| DECIMAL | zigzag(exponent) ++ zigzag(mantissa) (always normalized per Section 2.4) |
-| TEXT | Raw UTF-8 bytes (no length prefix) |
-| BYTES | Raw bytes (no length prefix) |
-| TIMESTAMP | 8 bytes, little-endian signed microseconds |
-| DATE | Raw UTF-8 bytes of ISO 8601 string |
-| POINT | 16 bytes: latitude (f64 LE) ++ longitude (f64 LE) |
-| EMBEDDING | 1 byte subtype ++ 4 bytes dims (LE u32) ++ raw data |
-| REF | 16 bytes: the referenced object's UUID (not the index) |
+**Unit (numerical types only):** INT64, FLOAT64, and DECIMAL values can optionally specify a unit (e.g., kg, USD). Unlike language, unit does NOT affect value uniqueness—setting "100 kg" then "200 lbs" on the same property results in "200 lbs" (the unit is metadata for interpretation).
 
 **Float value rules (NORMATIVE):** For FLOAT64, POINT, and EMBEDDING (float32 subtype):
 - **NaN is prohibited.** Encoders MUST NOT emit NaN values; decoders MUST reject them (E005). Use a separate "unknown" or "missing" representation at the application layer.
-- **Negative zero:** -0.0 and +0.0 are distinct bit patterns but compare equal. For `value_id` hashing, -0.0 MUST be normalized to +0.0 (sign bit = 0).
-- **Infinity:** ±Infinity are permitted and hash as their IEEE 754 bit patterns.
+- **Infinity:** ±Infinity are permitted.
 
 ### 2.6 Relations
 
@@ -378,9 +349,6 @@ CreateEntity {
 UpdateEntity {
   id: ID | index
   set_properties: List<Value>?        // LWW replace
-  add_values: List<Value>?            // Set union
-  remove_values: List<Value>?         // Set subtraction (by content)
-  remove_values_by_hash: List<ID>?    // Set subtraction (by value_id)
   unset_properties: List<ID | index>?
 }
 ```
@@ -388,25 +356,13 @@ UpdateEntity {
 | Field | Strategy | Use Case |
 |-------|----------|----------|
 | `set_properties` | LWW Replace | Name, Age |
-| `add_values` | Set Union | Tags, Emails |
-| `remove_values` | Set Subtraction | Remove small values |
-| `remove_values_by_hash` | Set Subtraction | Remove large values (embeddings) |
 | `unset_properties` | Clear All | Reset property |
 
-**`set_properties` semantics (NORMATIVE):** For a given property, `set_properties` replaces the property's entire value set with all `set_properties` entries for that property within this op. If multiple entries have identical identity, they deduplicate.
-
-**`remove_values` semantics (NORMATIVE):** Removes values whose `value_id` matches the `value_id` of the removal target (computed from property and payload bytes).
-
-**`remove_values_by_hash` semantics (NORMATIVE):** Removes values whose `value_id` matches any of the provided IDs. This avoids retransmitting large payloads (e.g., embeddings) for removal.
+**`set_properties` semantics (NORMATIVE):** For a given property (and language, for TEXT), `set_properties` replaces the existing value. For TEXT values, each language is treated independently—setting a value for one language does not affect values in other languages.
 
 **Application order within op (NORMATIVE):**
 1. `unset_properties`
 2. `set_properties`
-3. `remove_values`
-4. `remove_values_by_hash`
-5. `add_values`
-
-Removals are processed before additions, allowing a single op to "replace value X with value Y" by removing X and adding Y.
 
 **DeleteEntity:**
 ```
@@ -509,7 +465,8 @@ Edit {
   created_at: Timestamp
   properties: List<(ID, DataType)>
   relation_type_ids: List<ID>
-  language_ids: List<ID>    // Language entities for localized values
+  language_ids: List<ID>    // Language entities for localized TEXT values
+  unit_ids: List<ID>        // Unit entities for numerical values
   object_ids: List<ID>
   ops: List<Op>
 }
@@ -541,18 +498,15 @@ Where `op_index` is the zero-based index in the edit's `ops[]` array.
 
 #### 4.2.1 Merge Rules
 
-Merge behavior is determined by the **operation used**, not by property metadata. The protocol does not distinguish "single-value" vs "multi-value" properties at the schema level.
+All values use Last-Writer-Wins (LWW) semantics based on OpPosition. Values are unique per (entityId, propertyId, language) where language only applies to TEXT values.
 
-**`set_properties` (LWW):** Replaces the entire value set for a property. When concurrent edits both use `set_properties` on the same property, the op with the highest OpPosition wins.
-
-**`add_values` (Set Union):** Adds to the value set. Additions from different edits are all preserved.
+**`set_properties` (LWW):** Replaces the value for a property (and language, for TEXT). When concurrent edits both use `set_properties` on the same (property, language) combination, the op with the highest OpPosition wins.
 
 **Property value conflicts:**
 
 | Scenario | Resolution |
 |----------|------------|
 | Concurrent `set_properties` | Higher OpPosition wins (LWW) |
-| `set_properties` vs `add_values` | Apply in OpPosition order |
 | Delete vs Update | Delete wins (tombstone dominance) |
 
 **Structural conflicts:**
@@ -584,6 +538,8 @@ The property dictionary includes both ID and DataType. This allows values to omi
 **Relation type dictionary requirement (NORMATIVE):** All relation types referenced in an edit MUST be declared in the `relation_type_ids` dictionary.
 
 **Language dictionary requirement (NORMATIVE):** All non-default languages referenced in TEXT values MUST be declared in the `language_ids` dictionary. Language index 0 means default (no entry required); indices 1+ reference `language_ids[index-1]`. Only TEXT values have the language field.
+
+**Unit dictionary requirement (NORMATIVE):** All units referenced in numerical values (INT64, FLOAT64, DECIMAL) MUST be declared in the `unit_ids` dictionary. Unit index 0 means no unit; indices 1+ reference `unit_ids[index-1]`. Only numerical values have the unit field.
 
 **Object dictionary requirement (NORMATIVE):** All objects (entities and relations) referenced in an edit MUST be declared in the `object_ids` dictionary. This includes: operation targets (UpdateEntity, DeleteEntity, etc.), relation endpoints (`from`, `to`), and REF property values.
 
@@ -669,6 +625,11 @@ index: varint    // Must be < relation_type_count
 index: varint    // 0 = default (no language), 1+ = language_ids[index-1]
 ```
 
+**UnitRef:**
+```
+index: varint    // 0 = no unit, 1+ = unit_ids[index-1]
+```
+
 **ObjectRef:**
 ```
 index: varint    // Must be < object_count
@@ -694,7 +655,9 @@ properties: (ID, DataType)[]     // ID + uint8 data type per entry
 relation_type_count: varint
 relation_type_ids: ID[]
 language_count: varint
-language_ids: ID[]               // Language entity IDs for localized values
+language_ids: ID[]               // Language entity IDs for localized TEXT values
+unit_count: varint
+unit_ids: ID[]                   // Unit entity IDs for numerical values
 object_count: varint
 object_ids: ID[]
 
@@ -734,27 +697,15 @@ values: Value[]
 id: ObjectRef
 flags: uint8
   bit 0 = has_set_properties
-  bit 1 = has_add_values
-  bit 2 = has_remove_values
-  bit 3 = has_unset_properties
-  bit 4 = has_remove_values_by_hash
-  bits 5-7 = reserved (must be 0)
+  bit 1 = has_unset_properties
+  bits 2-7 = reserved (must be 0)
 
 [if has_set_properties]:
-  count: varint
-  values: Value[]
-[if has_add_values]:
-  count: varint
-  values: Value[]
-[if has_remove_values]:
   count: varint
   values: Value[]
 [if has_unset_properties]:
   count: varint
   properties: PropertyRef[]
-[if has_remove_values_by_hash]:
-  count: varint
-  value_ids: ID[]              // 16-byte value_id hashes
 ```
 
 **DeleteEntity:**
@@ -819,11 +770,14 @@ Value:
   property: PropertyRef
   payload: <type-specific>
   [if DataType == TEXT]: language: LanguageRef
+  [if DataType in (INT64, FLOAT64, DECIMAL)]: unit: UnitRef
 ```
 
 The payload type is determined by the property's DataType (from the properties dictionary).
 
-**Language (TEXT only):** The `language` field is only present for TEXT values. A value with `language = 0` is the default (unlocalized or English). Values with different languages for the same property coexist as multi-values with distinct identities. Non-TEXT values have no language field; their identity is determined by property and payload only.
+**Language (TEXT only):** The `language` field is only present for TEXT values. A value with `language = 0` is the default (unlocalized or English). Values with different languages for the same property are distinct and can coexist.
+
+**Unit (numerical types only):** The `unit` field is only present for INT64, FLOAT64, and DECIMAL values. A value with `unit = 0` has no unit. Unlike language, unit does NOT affect value uniqueness—it is metadata for interpretation only.
 
 **Payloads:**
 ```
@@ -932,6 +886,7 @@ Indexers MUST reject edits that fail structural validation:
 | Dictionary counts | Greater than 0xFFFFFFFE |
 | Reference indices | Index ≥ respective dictionary count |
 | Language indices (TEXT) | Index > 0 and (index - 1) ≥ language_count |
+| Unit indices (numerical) | Index > 0 and (index - 1) ≥ unit_count |
 | UTF-8 | Invalid encoding |
 | Reserved bits | Non-zero |
 | Mantissa bytes | Non-minimal encoding |
