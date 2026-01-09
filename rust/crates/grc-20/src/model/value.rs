@@ -115,16 +115,26 @@ pub enum Value<'a> {
     /// Boolean value.
     Bool(bool),
 
-    /// 64-bit signed integer.
-    Int64(i64),
+    /// 64-bit signed integer with optional unit.
+    Int64 {
+        value: i64,
+        /// Unit entity ID, or None for no unit.
+        unit: Option<Id>,
+    },
 
-    /// 64-bit IEEE 754 float (NaN not allowed).
-    Float64(f64),
+    /// 64-bit IEEE 754 float (NaN not allowed) with optional unit.
+    Float64 {
+        value: f64,
+        /// Unit entity ID, or None for no unit.
+        unit: Option<Id>,
+    },
 
-    /// Arbitrary-precision decimal: value = mantissa * 10^exponent.
+    /// Arbitrary-precision decimal: value = mantissa * 10^exponent, with optional unit.
     Decimal {
         exponent: i32,
         mantissa: DecimalMantissa<'a>,
+        /// Unit entity ID, or None for no unit.
+        unit: Option<Id>,
     },
 
     /// UTF-8 text with optional language.
@@ -168,8 +178,8 @@ impl Value<'_> {
     pub fn data_type(&self) -> DataType {
         match self {
             Value::Bool(_) => DataType::Bool,
-            Value::Int64(_) => DataType::Int64,
-            Value::Float64(_) => DataType::Float64,
+            Value::Int64 { .. } => DataType::Int64,
+            Value::Float64 { .. } => DataType::Float64,
             Value::Decimal { .. } => DataType::Decimal,
             Value::Text { .. } => DataType::Text,
             Value::Bytes(_) => DataType::Bytes,
@@ -186,12 +196,12 @@ impl Value<'_> {
     /// Returns an error description if invalid, None if valid.
     pub fn validate(&self) -> Option<&'static str> {
         match self {
-            Value::Float64(v) => {
-                if v.is_nan() {
+            Value::Float64 { value, .. } => {
+                if value.is_nan() {
                     return Some("NaN is not allowed in Float64");
                 }
             }
-            Value::Decimal { exponent, mantissa } => {
+            Value::Decimal { exponent, mantissa, .. } => {
                 // Zero must be {0, 0}
                 if mantissa.is_zero() && *exponent != 0 {
                     return Some("zero DECIMAL must have exponent 0");
@@ -270,10 +280,10 @@ mod tests {
 
     #[test]
     fn test_value_validation_nan() {
-        assert!(Value::Float64(f64::NAN).validate().is_some());
-        assert!(Value::Float64(f64::INFINITY).validate().is_none());
-        assert!(Value::Float64(-f64::INFINITY).validate().is_none());
-        assert!(Value::Float64(42.0).validate().is_none());
+        assert!(Value::Float64 { value: f64::NAN, unit: None }.validate().is_some());
+        assert!(Value::Float64 { value: f64::INFINITY, unit: None }.validate().is_none());
+        assert!(Value::Float64 { value: -f64::INFINITY, unit: None }.validate().is_none());
+        assert!(Value::Float64 { value: 42.0, unit: None }.validate().is_none());
     }
 
     #[test]
@@ -297,6 +307,7 @@ mod tests {
         let zero_bad = Value::Decimal {
             exponent: 1,
             mantissa: DecimalMantissa::I64(0),
+            unit: None,
         };
         assert!(zero_bad.validate().is_some());
 
@@ -304,6 +315,7 @@ mod tests {
         let trailing = Value::Decimal {
             exponent: 0,
             mantissa: DecimalMantissa::I64(1230),
+            unit: None,
         };
         assert!(trailing.validate().is_some());
 
@@ -311,6 +323,7 @@ mod tests {
         let valid = Value::Decimal {
             exponent: -2,
             mantissa: DecimalMantissa::I64(1234),
+            unit: None,
         };
         assert!(valid.validate().is_none());
     }

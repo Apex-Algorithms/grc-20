@@ -65,8 +65,6 @@ pub fn validate_edit(edit: &Edit, schema: &SchemaContext) -> Result<(), Validati
             }
             Op::UpdateEntity(ue) => {
                 validate_property_values(&ue.set_properties, &local_schema)?;
-                validate_property_values(&ue.add_values, &local_schema)?;
-                validate_property_values(&ue.remove_values, &local_schema)?;
             }
             _ => {}
         }
@@ -162,7 +160,7 @@ mod tests {
                 id: [2u8; 16],
                 values: vec![PropertyValue {
                     property: [1u8; 16],
-                    value: Value::Int64(42),
+                    value: Value::Int64 { value: 42, unit: None },
                 }],
             })],
         };

@@ -131,12 +131,14 @@ fn decode_edit_borrowed(input: &[u8]) -> Result<Edit<'_>, DecodeError> {
 
     let relation_types = reader.read_id_vec(MAX_DICT_SIZE, "relation_types")?;
     let languages = reader.read_id_vec(MAX_DICT_SIZE, "languages")?;
+    let units = reader.read_id_vec(MAX_DICT_SIZE, "units")?;
     let objects = reader.read_id_vec(MAX_DICT_SIZE, "objects")?;
 
     let dicts = WireDictionaries {
         properties,
         relation_types,
         languages,
+        units,
         objects,
     };
 
@@ -203,12 +205,14 @@ fn decode_edit_owned(data: &[u8]) -> Result<Edit<'static>, DecodeError> {
 
     let relation_types = reader.read_id_vec(MAX_DICT_SIZE, "relation_types")?;
     let languages = reader.read_id_vec(MAX_DICT_SIZE, "languages")?;
+    let units = reader.read_id_vec(MAX_DICT_SIZE, "units")?;
     let objects = reader.read_id_vec(MAX_DICT_SIZE, "objects")?;
 
     let dicts = WireDictionaries {
         properties,
         relation_types,
         languages,
+        units,
         objects,
     };
 
@@ -253,9 +257,6 @@ fn op_to_owned(op: Op<'_>) -> Op<'static> {
         Op::UpdateEntity(ue) => Op::UpdateEntity(crate::model::UpdateEntity {
             id: ue.id,
             set_properties: ue.set_properties.into_iter().map(pv_to_owned).collect(),
-            add_values: ue.add_values.into_iter().map(pv_to_owned).collect(),
-            remove_values: ue.remove_values.into_iter().map(pv_to_owned).collect(),
-            remove_values_by_hash: ue.remove_values_by_hash,
             unset_properties: ue.unset_properties,
         }),
         Op::DeleteEntity(de) => Op::DeleteEntity(de),
@@ -274,10 +275,6 @@ fn op_to_owned(op: Op<'_>) -> Op<'static> {
         Op::UpdateRelation(ur) => Op::UpdateRelation(crate::model::UpdateRelation {
             id: ur.id,
             position: ur.position.map(|p| Cow::Owned(p.into_owned())),
-            from_space: ur.from_space,
-            from_version: ur.from_version,
-            to_space: ur.to_space,
-            to_version: ur.to_version,
         }),
         Op::DeleteRelation(dr) => Op::DeleteRelation(dr),
         Op::CreateProperty(cp) => Op::CreateProperty(cp),
@@ -297,14 +294,15 @@ fn value_to_owned(v: crate::model::Value<'_>) -> crate::model::Value<'static> {
     use crate::model::{DecimalMantissa, Value};
     match v {
         Value::Bool(b) => Value::Bool(b),
-        Value::Int64(i) => Value::Int64(i),
-        Value::Float64(f) => Value::Float64(f),
-        Value::Decimal { exponent, mantissa } => Value::Decimal {
+        Value::Int64 { value, unit } => Value::Int64 { value, unit },
+        Value::Float64 { value, unit } => Value::Float64 { value, unit },
+        Value::Decimal { exponent, mantissa, unit } => Value::Decimal {
             exponent,
             mantissa: match mantissa {
                 DecimalMantissa::I64(i) => DecimalMantissa::I64(i),
                 DecimalMantissa::Big(b) => DecimalMantissa::Big(Cow::Owned(b.into_owned())),
             },
+            unit,
         },
         Value::Text { value, language } => Value::Text {
             value: Cow::Owned(value.into_owned()),

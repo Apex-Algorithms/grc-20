@@ -364,7 +364,7 @@ impl ConversionContext {
                     },
                     PropertyValue {
                         property: props::GMT_OFFSET,
-                        value: Value::Int64(tz.gmt_offset),
+                        value: Value::Int64 { value: tz.gmt_offset, unit: None },
                     },
                     PropertyValue {
                         property: props::GMT_OFFSET_NAME,
@@ -539,21 +539,21 @@ impl ConversionContext {
         if let Some(v) = country.population {
             values.push(PropertyValue {
                 property: props::POPULATION,
-                value: Value::Int64(v),
+                value: Value::Int64 { value: v, unit: None },
             });
         }
 
         if let Some(v) = country.gdp {
             values.push(PropertyValue {
                 property: props::GDP,
-                value: Value::Int64(v),
+                value: Value::Int64 { value: v, unit: None },
             });
         }
 
         if let Some(v) = country.area_sq_km {
             values.push(PropertyValue {
                 property: props::AREA_SQ_KM,
-                value: Value::Int64(v),
+                value: Value::Int64 { value: v, unit: None },
             });
         }
 

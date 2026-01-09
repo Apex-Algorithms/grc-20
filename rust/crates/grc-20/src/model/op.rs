@@ -50,25 +50,37 @@ pub struct CreateEntity<'a> {
 /// Application order within op:
 /// 1. unset_properties
 /// 2. set_properties
-/// 3. remove_values
-/// 4. remove_values_by_hash
-/// 5. add_values
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct UpdateEntity<'a> {
     /// The entity to update.
     pub id: Id,
-    /// Replace entire value set for these properties (LWW).
+    /// Replace value for these properties (LWW).
     pub set_properties: Vec<PropertyValue<'a>>,
-    /// Add values (set union).
-    pub add_values: Vec<PropertyValue<'a>>,
-    /// Remove values by content match.
-    pub remove_values: Vec<PropertyValue<'a>>,
-    /// Remove values by their value_id hash.
-    pub remove_values_by_hash: Vec<Id>,
-    /// Clear all values for these properties.
-    pub unset_properties: Vec<Id>,
+    /// Clear values for these properties (optionally specific language for TEXT).
+    pub unset_properties: Vec<UnsetProperty>,
 }
 
+/// Specifies a property to unset, optionally for a specific language (TEXT only).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UnsetProperty {
+    /// The property to clear.
+    pub property: Id,
+    /// For TEXT properties: if Some, clear only that language; if None, clear all languages.
+    /// For non-TEXT properties: must be None.
+    pub language: Option<Id>,
+}
+
+impl UnsetProperty {
+    /// Creates an UnsetProperty that clears all values for a property.
+    pub fn all(property: Id) -> Self {
+        Self { property, language: None }
+    }
+
+    /// Creates an UnsetProperty that clears a specific language for a TEXT property.
+    pub fn language(property: Id, language: Id) -> Self {
+        Self { property, language: Some(language) }
+    }
+}
 
 impl<'a> UpdateEntity<'a> {
     /// Creates a new UpdateEntity for the given entity ID.
@@ -76,20 +88,13 @@ impl<'a> UpdateEntity<'a> {
         Self {
             id,
             set_properties: Vec::new(),
-            add_values: Vec::new(),
-            remove_values: Vec::new(),
-            remove_values_by_hash: Vec::new(),
             unset_properties: Vec::new(),
         }
     }
 
     /// Returns true if this update has no actual changes.
     pub fn is_empty(&self) -> bool {
-        self.set_properties.is_empty()
-            && self.add_values.is_empty()
-            && self.remove_values.is_empty()
-            && self.remove_values_by_hash.is_empty()
-            && self.unset_properties.is_empty()
+        self.set_properties.is_empty() && self.unset_properties.is_empty()
     }
 }
 
@@ -153,23 +158,15 @@ impl CreateRelation<'_> {
     }
 }
 
-/// Updates a relation's mutable fields (spec Section 3.3).
+/// Updates a relation's position (spec Section 3.3).
 ///
-/// The structural fields (entity, type, from, to) remain immutable.
+/// All other fields (entity, type, from, to, space hints, version pins) are immutable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateRelation<'a> {
     /// The relation to update.
     pub id: Id,
     /// Optional new position for ordering.
     pub position: Option<Cow<'a, str>>,
-    /// Optional space hint for source entity.
-    pub from_space: Option<Id>,
-    /// Optional version (edit ID) to pin source entity.
-    pub from_version: Option<Id>,
-    /// Optional space hint for target entity.
-    pub to_space: Option<Id>,
-    /// Optional version (edit ID) to pin target entity.
-    pub to_version: Option<Id>,
 }
 
 /// Deletes a relation (spec Section 3.3).

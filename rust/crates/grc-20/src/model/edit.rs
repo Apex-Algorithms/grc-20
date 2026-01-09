@@ -63,6 +63,8 @@ pub struct WireDictionaries {
     pub relation_types: Vec<Id>,
     /// Language entity IDs for localized TEXT values.
     pub languages: Vec<Id>,
+    /// Unit entity IDs for numerical values.
+    pub units: Vec<Id>,
     /// Object IDs (entities, relations, REF targets).
     pub objects: Vec<Id>,
 }
@@ -95,6 +97,18 @@ impl WireDictionaries {
         }
     }
 
+    /// Looks up a unit ID by index.
+    ///
+    /// Index 0 means no unit, returns None.
+    /// Index 1+ maps to units[index-1].
+    pub fn get_unit(&self, index: usize) -> Option<&Id> {
+        if index == 0 {
+            None
+        } else {
+            self.units.get(index - 1)
+        }
+    }
+
     /// Looks up an object ID by index.
     pub fn get_object(&self, index: usize) -> Option<&Id> {
         self.objects.get(index)
@@ -112,6 +126,8 @@ pub struct DictionaryBuilder {
     relation_type_indices: FxHashMap<Id, usize>,
     languages: Vec<Id>,
     language_indices: FxHashMap<Id, usize>,
+    units: Vec<Id>,
+    unit_indices: FxHashMap<Id, usize>,
     objects: Vec<Id>,
     object_indices: FxHashMap<Id, usize>,
 }
@@ -128,11 +144,13 @@ impl DictionaryBuilder {
     /// - properties: ~estimated_ops / 4 (entities average ~4 properties)
     /// - relation_types: ~estimated_ops / 20 (fewer unique relation types)
     /// - languages: 4 (typically few languages per edit)
+    /// - units: 4 (typically few units per edit)
     /// - objects: ~estimated_ops / 2 (many ops reference existing objects)
     pub fn with_capacity(estimated_ops: usize) -> Self {
         let prop_cap = estimated_ops / 4 + 1;
         let rel_cap = estimated_ops / 20 + 1;
         let lang_cap = 4;
+        let unit_cap = 4;
         let obj_cap = estimated_ops / 2 + 1;
 
         Self {
@@ -142,6 +160,8 @@ impl DictionaryBuilder {
             relation_type_indices: FxHashMap::with_capacity_and_hasher(rel_cap, Default::default()),
             languages: Vec::with_capacity(lang_cap),
             language_indices: FxHashMap::with_capacity_and_hasher(lang_cap, Default::default()),
+            units: Vec::with_capacity(unit_cap),
+            unit_indices: FxHashMap::with_capacity_and_hasher(unit_cap, Default::default()),
             objects: Vec::with_capacity(obj_cap),
             object_indices: FxHashMap::with_capacity_and_hasher(obj_cap, Default::default()),
         }
@@ -190,6 +210,25 @@ impl DictionaryBuilder {
         }
     }
 
+    /// Adds or gets the index for a unit.
+    ///
+    /// Returns 0 for no unit, 1+ for actual units.
+    pub fn add_unit(&mut self, id: Option<Id>) -> usize {
+        match id {
+            None => 0,
+            Some(unit_id) => {
+                if let Some(&idx) = self.unit_indices.get(&unit_id) {
+                    idx + 1
+                } else {
+                    let idx = self.units.len();
+                    self.units.push(unit_id);
+                    self.unit_indices.insert(unit_id, idx);
+                    idx + 1
+                }
+            }
+        }
+    }
+
     /// Adds or gets the index for an object.
     pub fn add_object(&mut self, id: Id) -> usize {
         if let Some(&idx) = self.object_indices.get(&id) {
@@ -208,6 +247,7 @@ impl DictionaryBuilder {
             properties: self.properties,
             relation_types: self.relation_types,
             languages: self.languages,
+            units: self.units,
             objects: self.objects,
         }
     }
@@ -219,6 +259,7 @@ impl DictionaryBuilder {
             properties: self.properties.clone(),
             relation_types: self.relation_types.clone(),
             languages: self.languages.clone(),
+            units: self.units.clone(),
             objects: self.objects.clone(),
         }
     }
@@ -261,6 +302,9 @@ impl DictionaryBuilder {
 
         // Languages
         writer.write_id_vec(&self.languages);
+
+        // Units
+        writer.write_id_vec(&self.units);
 
         // Objects
         writer.write_id_vec(&self.objects);

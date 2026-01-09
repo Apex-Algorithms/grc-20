@@ -8,7 +8,7 @@ use crate::error::{DecodeError, EncodeError};
 use crate::limits::MAX_VALUES_PER_ENTITY;
 use crate::model::{
     CreateEntity, CreateProperty, CreateRelation, DataType, DeleteEntity, DeleteRelation,
-    DictionaryBuilder, Op, PropertyValue, RelationIdMode, UpdateEntity, UpdateRelation,
+    DictionaryBuilder, Op, PropertyValue, RelationIdMode, UnsetProperty, UpdateEntity, UpdateRelation,
     WireDictionaries,
 };
 
@@ -23,11 +23,8 @@ const OP_CREATE_PROPERTY: u8 = 7;
 
 // UpdateEntity flags
 const FLAG_HAS_SET_PROPERTIES: u8 = 0x01;
-const FLAG_HAS_ADD_VALUES: u8 = 0x02;
-const FLAG_HAS_REMOVE_VALUES: u8 = 0x04;
-const FLAG_HAS_UNSET_PROPERTIES: u8 = 0x08;
-const FLAG_HAS_REMOVE_VALUES_BY_HASH: u8 = 0x10;
-const UPDATE_ENTITY_RESERVED_MASK: u8 = 0xE0;
+const FLAG_HAS_UNSET_PROPERTIES: u8 = 0x02;
+const UPDATE_ENTITY_RESERVED_MASK: u8 = 0xFC;
 
 // CreateRelation flags
 const FLAG_HAS_POSITION: u8 = 0x01;
@@ -35,7 +32,10 @@ const FLAG_HAS_FROM_SPACE: u8 = 0x02;
 const FLAG_HAS_FROM_VERSION: u8 = 0x04;
 const FLAG_HAS_TO_SPACE: u8 = 0x08;
 const FLAG_HAS_TO_VERSION: u8 = 0x10;
-const RELATION_RESERVED_MASK: u8 = 0xE0;
+const CREATE_RELATION_RESERVED_MASK: u8 = 0xE0;
+
+// UpdateRelation flags (only position is mutable)
+const UPDATE_RELATION_RESERVED_MASK: u8 = 0xFE;
 
 // Relation ID modes
 const MODE_UNIQUE: u8 = 0;
@@ -123,34 +123,6 @@ fn decode_update_entity<'a>(
         }
     }
 
-    if flags & FLAG_HAS_ADD_VALUES != 0 {
-        let count = reader.read_varint("add_values_count")? as usize;
-        if count > MAX_VALUES_PER_ENTITY {
-            return Err(DecodeError::LengthExceedsLimit {
-                field: "add_values",
-                len: count,
-                max: MAX_VALUES_PER_ENTITY,
-            });
-        }
-        for _ in 0..count {
-            update.add_values.push(decode_property_value(reader, dicts)?);
-        }
-    }
-
-    if flags & FLAG_HAS_REMOVE_VALUES != 0 {
-        let count = reader.read_varint("remove_values_count")? as usize;
-        if count > MAX_VALUES_PER_ENTITY {
-            return Err(DecodeError::LengthExceedsLimit {
-                field: "remove_values",
-                len: count,
-                max: MAX_VALUES_PER_ENTITY,
-            });
-        }
-        for _ in 0..count {
-            update.remove_values.push(decode_property_value(reader, dicts)?);
-        }
-    }
-
     if flags & FLAG_HAS_UNSET_PROPERTIES != 0 {
         let count = reader.read_varint("unset_properties_count")? as usize;
         if count > MAX_VALUES_PER_ENTITY {
@@ -169,22 +141,24 @@ fn decode_update_entity<'a>(
                     size: dicts.properties.len(),
                 });
             }
-            update.unset_properties.push(dicts.properties[prop_index].0);
-        }
-    }
+            let property = dicts.properties[prop_index].0;
 
-    if flags & FLAG_HAS_REMOVE_VALUES_BY_HASH != 0 {
-        let count = reader.read_varint("remove_by_hash_count")? as usize;
-        if count > MAX_VALUES_PER_ENTITY {
-            return Err(DecodeError::LengthExceedsLimit {
-                field: "remove_values_by_hash",
-                len: count,
-                max: MAX_VALUES_PER_ENTITY,
-            });
-        }
-        for _ in 0..count {
-            let value_id = reader.read_id("value_id")?;
-            update.remove_values_by_hash.push(value_id);
+            let lang_index = reader.read_varint("unset.language")? as usize;
+            let language = if lang_index == 0 {
+                None
+            } else {
+                let idx = lang_index - 1;
+                if idx >= dicts.languages.len() {
+                    return Err(DecodeError::IndexOutOfBounds {
+                        dict: "languages",
+                        index: lang_index,
+                        size: dicts.languages.len() + 1,
+                    });
+                }
+                Some(dicts.languages[idx])
+            };
+
+            update.unset_properties.push(UnsetProperty { property, language });
         }
     }
 
@@ -252,7 +226,7 @@ fn decode_create_relation<'a>(
     let flags = reader.read_byte("relation_flags")?;
 
     // Check reserved bits
-    if flags & RELATION_RESERVED_MASK != 0 {
+    if flags & CREATE_RELATION_RESERVED_MASK != 0 {
         return Err(DecodeError::ReservedBitsSet {
             context: "CreateRelation flags",
         });
@@ -319,7 +293,7 @@ fn decode_update_relation<'a>(
     let flags = reader.read_byte("relation_flags")?;
 
     // Check reserved bits
-    if flags & RELATION_RESERVED_MASK != 0 {
+    if flags & UPDATE_RELATION_RESERVED_MASK != 0 {
         return Err(DecodeError::ReservedBitsSet {
             context: "UpdateRelation flags",
         });
@@ -331,38 +305,7 @@ fn decode_update_relation<'a>(
         None
     };
 
-    let from_space = if flags & FLAG_HAS_FROM_SPACE != 0 {
-        Some(reader.read_id("from_space")?)
-    } else {
-        None
-    };
-
-    let from_version = if flags & FLAG_HAS_FROM_VERSION != 0 {
-        Some(reader.read_id("from_version")?)
-    } else {
-        None
-    };
-
-    let to_space = if flags & FLAG_HAS_TO_SPACE != 0 {
-        Some(reader.read_id("to_space")?)
-    } else {
-        None
-    };
-
-    let to_version = if flags & FLAG_HAS_TO_VERSION != 0 {
-        Some(reader.read_id("to_version")?)
-    } else {
-        None
-    };
-
-    Ok(Op::UpdateRelation(UpdateRelation {
-        id,
-        position,
-        from_space,
-        from_version,
-        to_space,
-        to_version,
-    }))
+    Ok(Op::UpdateRelation(UpdateRelation { id, position }))
 }
 
 fn decode_delete_relation<'a>(
@@ -441,17 +384,8 @@ fn encode_update_entity(
     if !ue.set_properties.is_empty() {
         flags |= FLAG_HAS_SET_PROPERTIES;
     }
-    if !ue.add_values.is_empty() {
-        flags |= FLAG_HAS_ADD_VALUES;
-    }
-    if !ue.remove_values.is_empty() {
-        flags |= FLAG_HAS_REMOVE_VALUES;
-    }
     if !ue.unset_properties.is_empty() {
         flags |= FLAG_HAS_UNSET_PROPERTIES;
-    }
-    if !ue.remove_values_by_hash.is_empty() {
-        flags |= FLAG_HAS_REMOVE_VALUES_BY_HASH;
     }
     writer.write_byte(flags);
 
@@ -465,39 +399,14 @@ fn encode_update_entity(
         }
     }
 
-    if !ue.add_values.is_empty() {
-        writer.write_varint(ue.add_values.len() as u64);
-        for pv in &ue.add_values {
-            let data_type = property_types.get(&pv.property)
-                .copied()
-                .unwrap_or_else(|| pv.value.data_type());
-            encode_property_value(writer, pv, dict_builder, data_type)?;
-        }
-    }
-
-    if !ue.remove_values.is_empty() {
-        writer.write_varint(ue.remove_values.len() as u64);
-        for pv in &ue.remove_values {
-            let data_type = property_types.get(&pv.property)
-                .copied()
-                .unwrap_or_else(|| pv.value.data_type());
-            encode_property_value(writer, pv, dict_builder, data_type)?;
-        }
-    }
-
     if !ue.unset_properties.is_empty() {
         writer.write_varint(ue.unset_properties.len() as u64);
-        for prop_id in &ue.unset_properties {
+        for unset in &ue.unset_properties {
             // We need the data type to add to dictionary, use a placeholder
-            let idx = dict_builder.add_property(*prop_id, DataType::Bool);
+            let idx = dict_builder.add_property(unset.property, DataType::Bool);
             writer.write_varint(idx as u64);
-        }
-    }
-
-    if !ue.remove_values_by_hash.is_empty() {
-        writer.write_varint(ue.remove_values_by_hash.len() as u64);
-        for value_id in &ue.remove_values_by_hash {
-            writer.write_id(value_id);
+            let lang_index = dict_builder.add_language(unset.language);
+            writer.write_varint(lang_index as u64);
         }
     }
 
@@ -595,43 +504,12 @@ fn encode_update_relation(
     let id_index = dict_builder.add_object(ur.id);
     writer.write_varint(id_index as u64);
 
-    let mut flags = 0u8;
-    if ur.position.is_some() {
-        flags |= FLAG_HAS_POSITION;
-    }
-    if ur.from_space.is_some() {
-        flags |= FLAG_HAS_FROM_SPACE;
-    }
-    if ur.from_version.is_some() {
-        flags |= FLAG_HAS_FROM_VERSION;
-    }
-    if ur.to_space.is_some() {
-        flags |= FLAG_HAS_TO_SPACE;
-    }
-    if ur.to_version.is_some() {
-        flags |= FLAG_HAS_TO_VERSION;
-    }
+    let flags = if ur.position.is_some() { FLAG_HAS_POSITION } else { 0 };
     writer.write_byte(flags);
 
     if let Some(pos) = &ur.position {
         validate_position(pos)?;
         writer.write_string(pos);
-    }
-
-    if let Some(space) = &ur.from_space {
-        writer.write_id(space);
-    }
-
-    if let Some(version) = &ur.from_version {
-        writer.write_id(version);
-    }
-
-    if let Some(space) = &ur.to_space {
-        writer.write_id(space);
-    }
-
-    if let Some(version) = &ur.to_version {
-        writer.write_id(version);
     }
 
     Ok(())
@@ -846,10 +724,6 @@ mod tests {
         let op = Op::UpdateRelation(UpdateRelation {
             id: [1u8; 16],
             position: Some(Cow::Owned("xyz".to_string())),
-            from_space: Some([2u8; 16]),
-            from_version: Some([3u8; 16]),
-            to_space: None,
-            to_version: Some([4u8; 16]),
         });
 
         let mut dict_builder = DictionaryBuilder::new();
@@ -871,10 +745,6 @@ mod tests {
                     (None, None) => {}
                     _ => panic!("position mismatch"),
                 }
-                assert_eq!(r1.from_space, r2.from_space);
-                assert_eq!(r1.from_version, r2.from_version);
-                assert_eq!(r1.to_space, r2.to_space);
-                assert_eq!(r1.to_version, r2.to_version);
             }
             _ => panic!("expected UpdateRelation"),
         }

@@ -342,23 +342,30 @@ CreateEntity {
 
 **Semantics (NORMATIVE):** If the entity does not exist, create it. If it already exists, this acts as an update: values are applied as `set_properties` (LWW replace per property).
 
-> **Note:** CreateEntity is effectively an "upsert" operation. This is intentional: it simplifies edit generation (no need to track whether an entity exists) and supports idempotent replay. However, callers should be aware that CreateEntity on an existing entity will **replace** (not merge) values for any properties included in the op.
+> **Note:** CreateEntity is effectively an "upsert" operation. This is intentional: it simplifies edit generation (no need to track whether an entity exists) and supports idempotent replay. However, callers should be aware that CreateEntity on an existing entity will **replace** values for any properties included in the op.
 
 **UpdateEntity:**
 ```
 UpdateEntity {
   id: ID | index
   set_properties: List<Value>?        // LWW replace
-  unset_properties: List<ID | index>?
+  unset_properties: List<UnsetProperty>?
+}
+
+UnsetProperty {
+  property: ID | index
+  language: ID?    // TEXT only: if present, clear only that language; if absent, clear all
 }
 ```
 
 | Field | Strategy | Use Case |
 |-------|----------|----------|
 | `set_properties` | LWW Replace | Name, Age |
-| `unset_properties` | Clear All | Reset property |
+| `unset_properties` | Clear | Reset property or specific language |
 
 **`set_properties` semantics (NORMATIVE):** For a given property (and language, for TEXT), `set_properties` replaces the existing value. For TEXT values, each language is treated independently—setting a value for one language does not affect values in other languages.
+
+**`unset_properties` semantics (NORMATIVE):** Clears values for properties. For TEXT properties, if `language` is specified, only that language slot is cleared; if `language` is absent, all language slots for that property are cleared. For non-TEXT properties, `language` must be absent and the single value is cleared.
 
 **Application order within op (NORMATIVE):**
 1. `unset_properties`
@@ -391,21 +398,17 @@ CreateRelation {
 }
 ```
 
-**Semantics (NORMATIVE):** If the relation does not exist, create it along with its reified entity (if that entity does not already exist). If the relation already exists with the same ID, the op is ignored (relations are immutable except for position, space hints, and version pins). To add values to the relation, use UpdateEntity on the reified entity ID.
+**Semantics (NORMATIVE):** If the relation does not exist, create it along with its reified entity (if that entity does not already exist). If the relation already exists with the same ID, the op is ignored (relations are immutable except for position). To add values to the relation, use UpdateEntity on the reified entity ID.
 
 **UpdateRelation:**
 ```
 UpdateRelation {
   id: ID | index
-  from_space: ID?          // Optional space hint for source
-  from_version: ID?        // Optional version (edit ID) to pin source
-  to_space: ID?            // Optional space hint for target
-  to_version: ID?          // Optional version (edit ID) to pin target
   position: string?
 }
 ```
 
-Updates the relation's mutable fields. The structural fields (`entity`, `type`, `from`, `to`) remain immutable.
+Updates the relation's position. All other fields (`entity`, `type`, `from`, `to`, space hints, version pins) are immutable after creation.
 
 **DeleteRelation:**
 ```
@@ -581,7 +584,7 @@ Relation {
 
 Space hints are provenance metadata for performance, not hard requirements. Resolvers MAY use hints to prefer a specific space when resolving the target.
 
-**Version pinning:** The `from_version` and `to_version` fields allow pinning relation endpoints to a specific version (edit ID). This enables immutable citations where the relation always refers to the entity as it existed at that specific edit, rather than the current resolved state. Version pins are mutable via UpdateRelation.
+**Version pinning:** The `from_version` and `to_version` fields allow pinning relation endpoints to a specific version (edit ID). This enables immutable citations where the relation always refers to the entity as it existed at that specific edit, rather than the current resolved state. Version pins are immutable after creation.
 
 ---
 
@@ -705,7 +708,11 @@ flags: uint8
   values: Value[]
 [if has_unset_properties]:
   count: varint
-  properties: PropertyRef[]
+  unset_properties: UnsetProperty[]
+
+UnsetProperty:
+  property: PropertyRef
+  language: LanguageRef    // 0 = clear all, 1+ = clear specific language (TEXT only)
 ```
 
 **DeleteEntity:**
@@ -740,16 +747,8 @@ flags: uint8
 id: ObjectRef
 flags: uint8
   bit 0 = has_position
-  bit 1 = has_from_space
-  bit 2 = has_from_version
-  bit 3 = has_to_space
-  bit 4 = has_to_version
-  bits 5-7 = reserved (must be 0)
+  bits 1-7 = reserved (must be 0)
 [if has_position]: position: String
-[if has_from_space]: from_space: ID
-[if has_from_version]: from_version: ID
-[if has_to_space]: to_space: ID
-[if has_to_version]: to_version: ID
 ```
 
 **DeleteRelation:**

@@ -24,9 +24,9 @@ pub fn decode_value<'a>(
 ) -> Result<Value<'a>, DecodeError> {
     match data_type {
         DataType::Bool => decode_bool(reader),
-        DataType::Int64 => decode_int64(reader),
-        DataType::Float64 => decode_float64(reader),
-        DataType::Decimal => decode_decimal(reader),
+        DataType::Int64 => decode_int64(reader, dicts),
+        DataType::Float64 => decode_float64(reader, dicts),
+        DataType::Decimal => decode_decimal(reader, dicts),
         DataType::Text => decode_text(reader, dicts),
         DataType::Bytes => decode_bytes(reader),
         DataType::Timestamp => decode_timestamp(reader),
@@ -46,17 +46,45 @@ fn decode_bool<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
     }
 }
 
-fn decode_int64<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
+fn decode_int64<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Result<Value<'a>, DecodeError> {
     let value = reader.read_signed_varint("int64")?;
-    Ok(Value::Int64(value))
+    let unit_index = reader.read_varint("int64.unit")? as usize;
+    let unit = if unit_index == 0 {
+        None
+    } else {
+        let idx = unit_index - 1;
+        if idx >= dicts.units.len() {
+            return Err(DecodeError::IndexOutOfBounds {
+                dict: "units",
+                index: unit_index,
+                size: dicts.units.len() + 1,
+            });
+        }
+        Some(dicts.units[idx])
+    };
+    Ok(Value::Int64 { value, unit })
 }
 
-fn decode_float64<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
+fn decode_float64<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Result<Value<'a>, DecodeError> {
     let value = reader.read_f64("float64")?;
-    Ok(Value::Float64(value))
+    let unit_index = reader.read_varint("float64.unit")? as usize;
+    let unit = if unit_index == 0 {
+        None
+    } else {
+        let idx = unit_index - 1;
+        if idx >= dicts.units.len() {
+            return Err(DecodeError::IndexOutOfBounds {
+                dict: "units",
+                index: unit_index,
+                size: dicts.units.len() + 1,
+            });
+        }
+        Some(dicts.units[idx])
+    };
+    Ok(Value::Float64 { value, unit })
 }
 
-fn decode_decimal<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
+fn decode_decimal<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Result<Value<'a>, DecodeError> {
     let exponent = reader.read_signed_varint("decimal.exponent")? as i32;
     let mantissa_type = reader.read_byte("decimal.mantissa_type")?;
 
@@ -107,7 +135,22 @@ fn decode_decimal<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError>
         }
     }
 
-    Ok(Value::Decimal { exponent, mantissa })
+    let unit_index = reader.read_varint("decimal.unit")? as usize;
+    let unit = if unit_index == 0 {
+        None
+    } else {
+        let idx = unit_index - 1;
+        if idx >= dicts.units.len() {
+            return Err(DecodeError::IndexOutOfBounds {
+                dict: "units",
+                index: unit_index,
+                size: dicts.units.len() + 1,
+            });
+        }
+        Some(dicts.units[idx])
+    };
+
+    Ok(Value::Decimal { exponent, mantissa, unit })
 }
 
 fn decode_text<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Result<Value<'a>, DecodeError> {
@@ -266,19 +309,23 @@ pub fn encode_value(
         Value::Bool(v) => {
             writer.write_byte(if *v { 0x01 } else { 0x00 });
         }
-        Value::Int64(v) => {
-            writer.write_signed_varint(*v);
+        Value::Int64 { value, unit } => {
+            writer.write_signed_varint(*value);
+            let unit_index = dict_builder.add_unit(*unit);
+            writer.write_varint(unit_index as u64);
         }
-        Value::Float64(v) => {
-            if v.is_nan() {
+        Value::Float64 { value, unit } => {
+            if value.is_nan() {
                 return Err(EncodeError::FloatIsNan);
             }
-            // Normalize -0.0 to +0.0 for canonical encoding
-            let normalized = if *v == 0.0 { 0.0 } else { *v };
-            writer.write_f64(normalized);
+            writer.write_f64(*value);
+            let unit_index = dict_builder.add_unit(*unit);
+            writer.write_varint(unit_index as u64);
         }
-        Value::Decimal { exponent, mantissa } => {
+        Value::Decimal { exponent, mantissa, unit } => {
             encode_decimal(writer, *exponent, mantissa)?;
+            let unit_index = dict_builder.add_unit(*unit);
+            writer.write_varint(unit_index as u64);
         }
         Value::Text { value, language } => {
             writer.write_string(value);
@@ -304,11 +351,8 @@ pub fn encode_value(
             if lat.is_nan() || lon.is_nan() {
                 return Err(EncodeError::FloatIsNan);
             }
-            // Normalize -0.0 to +0.0
-            let norm_lat = if *lat == 0.0 { 0.0 } else { *lat };
-            let norm_lon = if *lon == 0.0 { 0.0 } else { *lon };
-            writer.write_f64(norm_lat);
-            writer.write_f64(norm_lon);
+            writer.write_f64(*lat);
+            writer.write_f64(*lon);
         }
         Value::Embedding { sub_type, dims, data } => {
             let expected = sub_type.bytes_for_dims(*dims);
@@ -415,79 +459,6 @@ pub fn decode_position<'a>(reader: &mut Reader<'a>) -> Result<Cow<'a, str>, Deco
     Ok(Cow::Borrowed(pos))
 }
 
-// =============================================================================
-// CANONICAL PAYLOAD
-// =============================================================================
-
-/// Computes the canonical payload bytes for a value (for value_id hashing).
-///
-/// This implements the canonical payload table from spec Section 2.5.
-pub fn canonical_payload(value: &Value<'_>) -> Vec<u8> {
-    let mut buf = Vec::new();
-
-    match value {
-        Value::Bool(v) => {
-            buf.push(if *v { 0x01 } else { 0x00 });
-        }
-        Value::Int64(v) => {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        Value::Float64(v) => {
-            // Normalize -0.0 to +0.0
-            let normalized = if *v == 0.0 { 0.0 } else { *v };
-            buf.extend_from_slice(&normalized.to_le_bytes());
-        }
-        Value::Decimal { exponent, mantissa } => {
-            // zigzag(exponent) ++ zigzag(mantissa)
-            let mut writer = Writer::new();
-            writer.write_signed_varint(*exponent as i64);
-            match mantissa {
-                DecimalMantissa::I64(m) => writer.write_signed_varint(*m),
-                DecimalMantissa::Big(bytes) => {
-                    // For big mantissa, we need to convert to a numeric representation
-                    // This is a simplified version
-                    writer.write_bytes(bytes);
-                }
-            }
-            buf = writer.into_bytes();
-        }
-        Value::Text { value, .. } => {
-            // Raw UTF-8 bytes (no length prefix)
-            buf.extend_from_slice(value.as_bytes());
-        }
-        Value::Bytes(bytes) => {
-            // Raw bytes (no length prefix)
-            buf.extend_from_slice(bytes);
-        }
-        Value::Timestamp(v) => {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        Value::Date(s) => {
-            // Raw UTF-8 bytes of ISO 8601 string
-            buf.extend_from_slice(s.as_bytes());
-        }
-        Value::Point { lat, lon } => {
-            // Normalize -0.0 to +0.0
-            let norm_lat = if *lat == 0.0 { 0.0 } else { *lat };
-            let norm_lon = if *lon == 0.0 { 0.0 } else { *lon };
-            buf.extend_from_slice(&norm_lat.to_le_bytes());
-            buf.extend_from_slice(&norm_lon.to_le_bytes());
-        }
-        Value::Embedding { sub_type, dims, data } => {
-            // 1 byte subtype ++ 4 bytes dims (LE u32) ++ raw data
-            buf.push(*sub_type as u8);
-            buf.extend_from_slice(&(*dims as u32).to_le_bytes());
-            buf.extend_from_slice(data);
-        }
-        Value::Ref(id) => {
-            // 16 bytes: the referenced object's UUID (not the index)
-            buf.extend_from_slice(id);
-        }
-    }
-
-    buf
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,13 +483,13 @@ mod tests {
     #[test]
     fn test_int64_roundtrip() {
         for v in [0i64, 1, -1, i64::MAX, i64::MIN, 12345678] {
-            let value = Value::Int64(v);
-            let dicts = WireDictionaries::default();
+            let value = Value::Int64 { value: v, unit: None };
             let mut dict_builder = DictionaryBuilder::new();
 
             let mut writer = Writer::new();
             encode_value(&mut writer, &value, &mut dict_builder).unwrap();
 
+            let dicts = dict_builder.build();
             let mut reader = Reader::new(writer.as_bytes());
             let decoded = decode_value(&mut reader, DataType::Int64, &dicts).unwrap();
 
@@ -529,13 +500,13 @@ mod tests {
     #[test]
     fn test_float64_roundtrip() {
         for v in [0.0, 1.0, -1.0, f64::INFINITY, f64::NEG_INFINITY, 3.14159] {
-            let value = Value::Float64(v);
-            let dicts = WireDictionaries::default();
+            let value = Value::Float64 { value: v, unit: None };
             let mut dict_builder = DictionaryBuilder::new();
 
             let mut writer = Writer::new();
             encode_value(&mut writer, &value, &mut dict_builder).unwrap();
 
+            let dicts = dict_builder.build();
             let mut reader = Reader::new(writer.as_bytes());
             let decoded = decode_value(&mut reader, DataType::Float64, &dicts).unwrap();
 
@@ -631,6 +602,7 @@ mod tests {
         let valid = Value::Decimal {
             exponent: -2,
             mantissa: DecimalMantissa::I64(1234),
+            unit: None,
         };
         let mut dict_builder = DictionaryBuilder::new();
         let mut writer = Writer::new();
@@ -640,6 +612,7 @@ mod tests {
         let invalid = Value::Decimal {
             exponent: -2,
             mantissa: DecimalMantissa::I64(1230),
+            unit: None,
         };
         let mut dict_builder = DictionaryBuilder::new();
         let mut writer = Writer::new();
