@@ -86,8 +86,9 @@ pub use codec::{
 pub use error::{DecodeError, EncodeError, ValidationError};
 pub use model::{
     CreateEntity, CreateProperty, CreateRelation, DataType, DecimalMantissa, DeleteEntity,
-    DeleteRelation, DictionaryBuilder, Edit, EmbeddingSubType, Id, Op, Property, PropertyValue,
-    RelationIdMode, UpdateEntity, UpdateRelation, Value, WireDictionaries,
+    DeleteRelation, DictionaryBuilder, Edit, EditBuilder, EmbeddingSubType, EntityBuilder, Id,
+    Op, Property, PropertyValue, RelationBuilder, RelationIdMode, UnsetLanguage, UpdateEntity,
+    UpdateEntityBuilder, UpdateRelation, Value, WireDictionaries,
 };
 pub use model::id::{derived_uuid, format_id, parse_id, text_value_id, unique_relation_id, value_id, NIL_ID};
 pub use validate::{validate_edit, validate_position, validate_value, SchemaContext};

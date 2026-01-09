@@ -527,8 +527,9 @@ fn encode_edit_canonical(edit: &Edit) -> Result<Vec<u8>, EncodeError> {
 
     // Pass 2: Encode ops with sorted dictionary indices and sorted values
     let mut ops_writer = Writer::with_capacity(edit.ops.len() * 50);
+    let mut canonical_builder = sorted_builder.clone();
     for op in &edit.ops {
-        encode_op_canonical(&mut ops_writer, op, &mut sorted_builder.clone(), &property_types)?;
+        encode_op_canonical(&mut ops_writer, op, &mut canonical_builder, &property_types)?;
     }
 
     // Assemble final output: header + dictionaries + ops

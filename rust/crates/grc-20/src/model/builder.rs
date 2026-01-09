@@ -75,7 +75,6 @@ impl<'a> EditBuilder<'a> {
     }
 
     /// Sets the creation timestamp to now.
-    #[cfg(feature = "std")]
     pub fn created_now(mut self) -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
         let micros = SystemTime::now()
@@ -129,7 +128,7 @@ impl<'a> EditBuilder<'a> {
     {
         let builder = f(UpdateEntityBuilder::new(id));
         self.ops.push(Op::UpdateEntity(UpdateEntity {
-            id,
+            id: builder.id,
             set_properties: builder.set_properties,
             unset_properties: builder.unset_properties,
         }));
@@ -353,20 +352,45 @@ impl<'a> EntityBuilder<'a> {
         self
     }
 
-    /// Adds a URL value.
-    pub fn url(mut self, property: Id, value: impl Into<Cow<'a, str>>) -> Self {
+    /// Adds a TIMESTAMP value (microseconds since Unix epoch).
+    pub fn timestamp(mut self, property: Id, micros: i64) -> Self {
         self.values.push(PropertyValue {
             property,
-            value: Value::Url(value.into()),
+            value: Value::Timestamp(micros),
         });
         self
     }
 
-    /// Adds a REFERENCE value (entity ID).
-    pub fn reference(mut self, property: Id, entity_id: Id) -> Self {
+    /// Adds a DECIMAL value.
+    pub fn decimal(
+        mut self,
+        property: Id,
+        exponent: i32,
+        mantissa: crate::model::DecimalMantissa<'a>,
+        unit: Option<Id>,
+    ) -> Self {
         self.values.push(PropertyValue {
             property,
-            value: Value::Reference(entity_id),
+            value: Value::Decimal { exponent, mantissa, unit },
+        });
+        self
+    }
+
+    /// Adds an EMBEDDING value.
+    pub fn embedding(
+        mut self,
+        property: Id,
+        sub_type: crate::model::EmbeddingSubType,
+        dims: usize,
+        data: impl Into<Cow<'a, [u8]>>,
+    ) -> Self {
+        self.values.push(PropertyValue {
+            property,
+            value: Value::Embedding {
+                sub_type,
+                dims,
+                data: data.into(),
+            },
         });
         self
     }
@@ -458,20 +482,54 @@ impl<'a> UpdateEntityBuilder<'a> {
         self
     }
 
-    /// Sets a URL value.
-    pub fn set_url(mut self, property: Id, value: impl Into<Cow<'a, str>>) -> Self {
+    /// Sets a TIMESTAMP value.
+    pub fn set_timestamp(mut self, property: Id, micros: i64) -> Self {
         self.set_properties.push(PropertyValue {
             property,
-            value: Value::Url(value.into()),
+            value: Value::Timestamp(micros),
         });
         self
     }
 
-    /// Sets a REFERENCE value.
-    pub fn set_reference(mut self, property: Id, entity_id: Id) -> Self {
+    /// Sets a BYTES value.
+    pub fn set_bytes(mut self, property: Id, value: impl Into<Cow<'a, [u8]>>) -> Self {
         self.set_properties.push(PropertyValue {
             property,
-            value: Value::Reference(entity_id),
+            value: Value::Bytes(value.into()),
+        });
+        self
+    }
+
+    /// Sets a DECIMAL value.
+    pub fn set_decimal(
+        mut self,
+        property: Id,
+        exponent: i32,
+        mantissa: crate::model::DecimalMantissa<'a>,
+        unit: Option<Id>,
+    ) -> Self {
+        self.set_properties.push(PropertyValue {
+            property,
+            value: Value::Decimal { exponent, mantissa, unit },
+        });
+        self
+    }
+
+    /// Sets an EMBEDDING value.
+    pub fn set_embedding(
+        mut self,
+        property: Id,
+        sub_type: crate::model::EmbeddingSubType,
+        dims: usize,
+        data: impl Into<Cow<'a, [u8]>>,
+    ) -> Self {
+        self.set_properties.push(PropertyValue {
+            property,
+            value: Value::Embedding {
+                sub_type,
+                dims,
+                data: data.into(),
+            },
         });
         self
     }
@@ -735,8 +793,8 @@ mod tests {
                     .bool([5u8; 16], true)
                     .point([6u8; 16], 40.7128, -74.0060)
                     .date([7u8; 16], "2024-01-15")
-                    .url([8u8; 16], "https://example.com")
-                    .reference([9u8; 16], [10u8; 16])
+                    .timestamp([8u8; 16], 1704067200_000_000)
+                    .bytes([9u8; 16], vec![1, 2, 3, 4])
             })
             .build();
 
