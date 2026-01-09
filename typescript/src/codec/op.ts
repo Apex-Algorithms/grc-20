@@ -1,0 +1,408 @@
+import type { Id } from "../types/id.js";
+import type {
+  CreateEntity,
+  CreateProperty,
+  CreateRelation,
+  DeleteEntity,
+  DeleteRelation,
+  Op,
+  RestoreEntity,
+  RestoreRelation,
+  UnsetLanguage,
+  UnsetProperty,
+  UpdateEntity,
+  UpdateRelation,
+} from "../types/op.js";
+import {
+  OP_TYPE_CREATE_ENTITY,
+  OP_TYPE_CREATE_PROPERTY,
+  OP_TYPE_CREATE_RELATION,
+  OP_TYPE_DELETE_ENTITY,
+  OP_TYPE_DELETE_RELATION,
+  OP_TYPE_RESTORE_ENTITY,
+  OP_TYPE_RESTORE_RELATION,
+  OP_TYPE_UPDATE_ENTITY,
+  OP_TYPE_UPDATE_RELATION,
+} from "../types/op.js";
+import { DataType } from "../types/value.js";
+import { DecodeError, Reader, Writer } from "./primitives.js";
+import {
+  decodePropertyValue,
+  encodePropertyValue,
+  type DictionaryIndices,
+  type DictionaryLookups,
+} from "./value.js";
+
+/**
+ * Extended dictionary indices for ops (includes objects).
+ */
+export interface OpDictionaryIndices extends DictionaryIndices {
+  getObjectIndex(id: Id): number;
+  getRelationTypeIndex(id: Id): number;
+}
+
+/**
+ * Extended dictionary lookups for ops.
+ */
+export interface OpDictionaryLookups extends DictionaryLookups {
+  getObject(index: number): Id;
+  getRelationType(index: number): Id;
+}
+
+// UpdateEntity flags
+const UPDATE_HAS_SET_PROPERTIES = 0x01;
+const UPDATE_HAS_UNSET_PROPERTIES = 0x02;
+
+// CreateRelation flags
+const RELATION_HAS_FROM_SPACE = 0x01;
+const RELATION_HAS_FROM_VERSION = 0x02;
+const RELATION_HAS_TO_SPACE = 0x04;
+const RELATION_HAS_TO_VERSION = 0x08;
+const RELATION_HAS_ENTITY = 0x10;
+const RELATION_HAS_POSITION = 0x20;
+
+// UpdateRelation flags
+const UPDATE_REL_HAS_POSITION = 0x01;
+
+/**
+ * Encodes a single operation.
+ */
+export function encodeOp(writer: Writer, op: Op, dicts: OpDictionaryIndices): void {
+  switch (op.type) {
+    case "createEntity":
+      encodeCreateEntity(writer, op, dicts);
+      break;
+    case "updateEntity":
+      encodeUpdateEntity(writer, op, dicts);
+      break;
+    case "deleteEntity":
+      encodeDeleteEntity(writer, op, dicts);
+      break;
+    case "restoreEntity":
+      encodeRestoreEntity(writer, op, dicts);
+      break;
+    case "createRelation":
+      encodeCreateRelation(writer, op, dicts);
+      break;
+    case "updateRelation":
+      encodeUpdateRelation(writer, op, dicts);
+      break;
+    case "deleteRelation":
+      encodeDeleteRelation(writer, op, dicts);
+      break;
+    case "restoreRelation":
+      encodeRestoreRelation(writer, op, dicts);
+      break;
+    case "createProperty":
+      encodeCreateProperty(writer, op);
+      break;
+  }
+}
+
+function encodeCreateEntity(writer: Writer, op: CreateEntity, dicts: OpDictionaryIndices): void {
+  writer.writeByte(OP_TYPE_CREATE_ENTITY);
+  writer.writeId(op.id);
+  writer.writeVarintNumber(op.values.length);
+  for (const value of op.values) {
+    encodePropertyValue(writer, value, dicts);
+  }
+}
+
+function encodeUpdateEntity(writer: Writer, op: UpdateEntity, dicts: OpDictionaryIndices): void {
+  writer.writeByte(OP_TYPE_UPDATE_ENTITY);
+  writer.writeVarintNumber(dicts.getObjectIndex(op.id));
+
+  let flags = 0;
+  if (op.setProperties.length > 0) flags |= UPDATE_HAS_SET_PROPERTIES;
+  if (op.unsetProperties.length > 0) flags |= UPDATE_HAS_UNSET_PROPERTIES;
+  writer.writeByte(flags);
+
+  if (op.setProperties.length > 0) {
+    writer.writeVarintNumber(op.setProperties.length);
+    for (const value of op.setProperties) {
+      encodePropertyValue(writer, value, dicts);
+    }
+  }
+
+  if (op.unsetProperties.length > 0) {
+    writer.writeVarintNumber(op.unsetProperties.length);
+    for (const unset of op.unsetProperties) {
+      encodeUnsetProperty(writer, unset, dicts);
+    }
+  }
+}
+
+function encodeUnsetProperty(writer: Writer, unset: UnsetProperty, dicts: DictionaryIndices): void {
+  writer.writeVarintNumber(dicts.getPropertyIndex(unset.property));
+  encodeUnsetLanguage(writer, unset.language, dicts);
+}
+
+function encodeUnsetLanguage(writer: Writer, lang: UnsetLanguage, dicts: DictionaryIndices): void {
+  switch (lang.type) {
+    case "all":
+      writer.writeVarint(0xffffffffn); // 0xFFFFFFFF
+      break;
+    case "nonLinguistic":
+      writer.writeVarintNumber(0);
+      break;
+    case "specific":
+      writer.writeVarintNumber(dicts.getLanguageIndex(lang.language));
+      break;
+  }
+}
+
+function encodeDeleteEntity(writer: Writer, op: DeleteEntity, dicts: OpDictionaryIndices): void {
+  writer.writeByte(OP_TYPE_DELETE_ENTITY);
+  writer.writeVarintNumber(dicts.getObjectIndex(op.id));
+}
+
+function encodeRestoreEntity(writer: Writer, op: RestoreEntity, dicts: OpDictionaryIndices): void {
+  writer.writeByte(OP_TYPE_RESTORE_ENTITY);
+  writer.writeVarintNumber(dicts.getObjectIndex(op.id));
+}
+
+function encodeCreateRelation(writer: Writer, op: CreateRelation, dicts: OpDictionaryIndices): void {
+  writer.writeByte(OP_TYPE_CREATE_RELATION);
+
+  // Mode: 0 = unique, 1 = many
+  if (op.idMode.type === "unique") {
+    writer.writeByte(0);
+  } else {
+    writer.writeByte(1);
+    writer.writeId(op.idMode.id);
+  }
+
+  // Type, from, to
+  writer.writeVarintNumber(dicts.getRelationTypeIndex(op.relationType));
+  writer.writeVarintNumber(dicts.getObjectIndex(op.from));
+  writer.writeVarintNumber(dicts.getObjectIndex(op.to));
+
+  // Flags
+  let flags = 0;
+  if (op.fromSpace) flags |= RELATION_HAS_FROM_SPACE;
+  if (op.fromVersion) flags |= RELATION_HAS_FROM_VERSION;
+  if (op.toSpace) flags |= RELATION_HAS_TO_SPACE;
+  if (op.toVersion) flags |= RELATION_HAS_TO_VERSION;
+  if (op.entity) flags |= RELATION_HAS_ENTITY;
+  if (op.position) flags |= RELATION_HAS_POSITION;
+  writer.writeByte(flags);
+
+  // Optional fields
+  if (op.fromSpace) writer.writeId(op.fromSpace);
+  if (op.fromVersion) writer.writeId(op.fromVersion);
+  if (op.toSpace) writer.writeId(op.toSpace);
+  if (op.toVersion) writer.writeId(op.toVersion);
+  if (op.entity) writer.writeId(op.entity);
+  if (op.position) writer.writeString(op.position);
+}
+
+function encodeUpdateRelation(writer: Writer, op: UpdateRelation, dicts: OpDictionaryIndices): void {
+  writer.writeByte(OP_TYPE_UPDATE_RELATION);
+  writer.writeVarintNumber(dicts.getObjectIndex(op.id));
+
+  let flags = 0;
+  if (op.position !== undefined) flags |= UPDATE_REL_HAS_POSITION;
+  writer.writeByte(flags);
+
+  if (op.position !== undefined) {
+    writer.writeString(op.position);
+  }
+}
+
+function encodeDeleteRelation(writer: Writer, op: DeleteRelation, dicts: OpDictionaryIndices): void {
+  writer.writeByte(OP_TYPE_DELETE_RELATION);
+  writer.writeVarintNumber(dicts.getObjectIndex(op.id));
+}
+
+function encodeRestoreRelation(writer: Writer, op: RestoreRelation, dicts: OpDictionaryIndices): void {
+  writer.writeByte(OP_TYPE_RESTORE_RELATION);
+  writer.writeVarintNumber(dicts.getObjectIndex(op.id));
+}
+
+function encodeCreateProperty(writer: Writer, op: CreateProperty): void {
+  writer.writeByte(OP_TYPE_CREATE_PROPERTY);
+  writer.writeId(op.id);
+  writer.writeByte(op.dataType);
+}
+
+/**
+ * Decodes a single operation.
+ */
+export function decodeOp(reader: Reader, dicts: OpDictionaryLookups): Op {
+  const opType = reader.readByte();
+
+  switch (opType) {
+    case OP_TYPE_CREATE_ENTITY:
+      return decodeCreateEntity(reader, dicts);
+    case OP_TYPE_UPDATE_ENTITY:
+      return decodeUpdateEntity(reader, dicts);
+    case OP_TYPE_DELETE_ENTITY:
+      return decodeDeleteEntity(reader, dicts);
+    case OP_TYPE_RESTORE_ENTITY:
+      return decodeRestoreEntity(reader, dicts);
+    case OP_TYPE_CREATE_RELATION:
+      return decodeCreateRelation(reader, dicts);
+    case OP_TYPE_UPDATE_RELATION:
+      return decodeUpdateRelation(reader, dicts);
+    case OP_TYPE_DELETE_RELATION:
+      return decodeDeleteRelation(reader, dicts);
+    case OP_TYPE_RESTORE_RELATION:
+      return decodeRestoreRelation(reader, dicts);
+    case OP_TYPE_CREATE_PROPERTY:
+      return decodeCreateProperty(reader);
+    default:
+      throw new DecodeError("E005", `invalid op type: ${opType}`);
+  }
+}
+
+function decodeCreateEntity(reader: Reader, dicts: OpDictionaryLookups): CreateEntity {
+  const id = reader.readId();
+  const valueCount = reader.readVarintNumber();
+  const values = [];
+  for (let i = 0; i < valueCount; i++) {
+    values.push(decodePropertyValue(reader, dicts));
+  }
+  return { type: "createEntity", id, values };
+}
+
+function decodeUpdateEntity(reader: Reader, dicts: OpDictionaryLookups): UpdateEntity {
+  const id = dicts.getObject(reader.readVarintNumber());
+  const flags = reader.readByte();
+
+  // Check reserved bits
+  if ((flags & 0xfc) !== 0) {
+    throw new DecodeError("E005", "reserved bits are non-zero in UpdateEntity flags");
+  }
+
+  const setProperties = [];
+  if (flags & UPDATE_HAS_SET_PROPERTIES) {
+    const count = reader.readVarintNumber();
+    for (let i = 0; i < count; i++) {
+      setProperties.push(decodePropertyValue(reader, dicts));
+    }
+  }
+
+  const unsetProperties: UnsetProperty[] = [];
+  if (flags & UPDATE_HAS_UNSET_PROPERTIES) {
+    const count = reader.readVarintNumber();
+    for (let i = 0; i < count; i++) {
+      unsetProperties.push(decodeUnsetProperty(reader, dicts));
+    }
+  }
+
+  return { type: "updateEntity", id, setProperties, unsetProperties };
+}
+
+function decodeUnsetProperty(reader: Reader, dicts: DictionaryLookups): UnsetProperty {
+  const propIndex = reader.readVarintNumber();
+  const prop = dicts.getProperty(propIndex);
+  const language = decodeUnsetLanguage(reader, dicts);
+  return { property: prop.id, language };
+}
+
+function decodeUnsetLanguage(reader: Reader, dicts: DictionaryLookups): UnsetLanguage {
+  const langValue = reader.readVarint();
+  if (langValue === 0xffffffffn) {
+    return { type: "all" };
+  } else if (langValue === 0n) {
+    return { type: "nonLinguistic" };
+  } else {
+    const language = dicts.getLanguage(Number(langValue));
+    if (!language) {
+      throw new DecodeError("E002", `language index ${langValue} out of bounds`);
+    }
+    return { type: "specific", language };
+  }
+}
+
+function decodeDeleteEntity(reader: Reader, dicts: OpDictionaryLookups): DeleteEntity {
+  const id = dicts.getObject(reader.readVarintNumber());
+  return { type: "deleteEntity", id };
+}
+
+function decodeRestoreEntity(reader: Reader, dicts: OpDictionaryLookups): RestoreEntity {
+  const id = dicts.getObject(reader.readVarintNumber());
+  return { type: "restoreEntity", id };
+}
+
+function decodeCreateRelation(reader: Reader, dicts: OpDictionaryLookups): CreateRelation {
+  const mode = reader.readByte();
+  let idMode: CreateRelation["idMode"];
+  if (mode === 0) {
+    idMode = { type: "unique" };
+  } else if (mode === 1) {
+    idMode = { type: "many", id: reader.readId() };
+  } else {
+    throw new DecodeError("E005", `invalid relation mode: ${mode}`);
+  }
+
+  const relationType = dicts.getRelationType(reader.readVarintNumber());
+  const from = dicts.getObject(reader.readVarintNumber());
+  const to = dicts.getObject(reader.readVarintNumber());
+  const flags = reader.readByte();
+
+  // Check reserved bits
+  if ((flags & 0xc0) !== 0) {
+    throw new DecodeError("E005", "reserved bits are non-zero in CreateRelation flags");
+  }
+
+  const fromSpace = flags & RELATION_HAS_FROM_SPACE ? reader.readId() : undefined;
+  const fromVersion = flags & RELATION_HAS_FROM_VERSION ? reader.readId() : undefined;
+  const toSpace = flags & RELATION_HAS_TO_SPACE ? reader.readId() : undefined;
+  const toVersion = flags & RELATION_HAS_TO_VERSION ? reader.readId() : undefined;
+  const entity = flags & RELATION_HAS_ENTITY ? reader.readId() : undefined;
+  const position = flags & RELATION_HAS_POSITION ? reader.readString() : undefined;
+
+  // Validate: unique mode cannot have explicit entity
+  if (mode === 0 && entity) {
+    throw new DecodeError("E005", "unique mode relation cannot have explicit entity");
+  }
+
+  return {
+    type: "createRelation",
+    idMode,
+    relationType,
+    from,
+    to,
+    fromSpace,
+    fromVersion,
+    toSpace,
+    toVersion,
+    entity,
+    position,
+  };
+}
+
+function decodeUpdateRelation(reader: Reader, dicts: OpDictionaryLookups): UpdateRelation {
+  const id = dicts.getObject(reader.readVarintNumber());
+  const flags = reader.readByte();
+
+  // Check reserved bits
+  if ((flags & 0xfe) !== 0) {
+    throw new DecodeError("E005", "reserved bits are non-zero in UpdateRelation flags");
+  }
+
+  const position = flags & UPDATE_REL_HAS_POSITION ? reader.readString() : undefined;
+
+  return { type: "updateRelation", id, position };
+}
+
+function decodeDeleteRelation(reader: Reader, dicts: OpDictionaryLookups): DeleteRelation {
+  const id = dicts.getObject(reader.readVarintNumber());
+  return { type: "deleteRelation", id };
+}
+
+function decodeRestoreRelation(reader: Reader, dicts: OpDictionaryLookups): RestoreRelation {
+  const id = dicts.getObject(reader.readVarintNumber());
+  return { type: "restoreRelation", id };
+}
+
+function decodeCreateProperty(reader: Reader): CreateProperty {
+  const id = reader.readId();
+  const dataTypeByte = reader.readByte();
+  if (dataTypeByte < 1 || dataTypeByte > 10) {
+    throw new DecodeError("E005", `invalid data type: ${dataTypeByte}`);
+  }
+  const dataType = dataTypeByte as DataType;
+  return { type: "createProperty", id, dataType };
+}
