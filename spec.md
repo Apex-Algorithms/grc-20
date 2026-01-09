@@ -858,51 +858,36 @@ compressed_data: zstd frame
 
 ## 7. Genesis Space
 
-The Genesis Space provides well-known IDs.
+The Genesis Space provides well-known IDs for universal concepts. These are the minimum IDs needed at the protocol level; applications may define additional schema on top.
 
 ### 7.1 Core Properties
 
-| Name | Data Type | Description |
-|------|-----------|-------------|
-| Name | TEXT | Primary label |
-| Description | TEXT | Summary text |
-| Avatar | TEXT | Image URL |
-| URL | TEXT | External link |
-| Created | TIMESTAMP | Creation time |
-| Modified | TIMESTAMP | Last modification |
+| Name | UUID | Data Type | Description |
+|------|------|-----------|-------------|
+| Name | `a126ca530c8e48d5b88882c734c38935` | TEXT | Primary label |
+| Description | `9b1f76ff9711404c861e59dc3fa7d037` | TEXT | Summary text |
+| Cover | `34f535072e6b42c5a84443981a77cfa2` | TEXT | Cover image URL |
 
-### 7.2 Core Types
+### 7.2 Core Type
 
-| Name | Description |
-|------|-------------|
-| Person | Human individual |
-| Organization | Company, DAO, institution |
-| Place | Geographic location |
-| Topic | Subject or concept |
+| Name | UUID | Description |
+|------|------|-------------|
+| Image | `f3f790c4c74e4d23a0a91e8ef84e30d9` | Image entity |
 
-### 7.3 Core Relation Types
+### 7.3 Core Relation Type
 
-| Name | Description |
-|------|-------------|
-| Types | Type membership |
-| PartOf | Composition/containment |
-| RelatedTo | Generic association |
+| Name | UUID | Description |
+|------|------|-------------|
+| Types | `8f151ba4de204e3c9cb499ddf96f48f1` | Type membership |
 
-### 7.4 Languages IDs
+### 7.4 Language IDs
 
-Language entities for localized values. IDs derived as `derived_uuid("grc20:genesis:language:" + code)`.
-
-### 7.5 ID Derivation
-
-Genesis IDs are derived using `derived_uuid` (Section 2.1):
+Language entities for localized TEXT values. IDs are derived:
 ```
-id = derived_uuid("grc20:genesis:" + name)
+id = derived_uuid("grc20:genesis:language:" + iso_code)
 ```
 
-For languages, the derivation uses:
-```
-id = derived_uuid("grc20:genesis:language:" + code)
-```
+Example: English (en) = `derived_uuid("grc20:genesis:language:en")`
 
 ---
 
