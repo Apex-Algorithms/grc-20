@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GRC-20 Browser Demo</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 800px;
+      margin: 40px auto;
+      padding: 20px;
+      line-height: 1.6;
+    }
+    h1 { color: #333; }
+    .status {
+      padding: 10px;
+      border-radius: 4px;
+      margin: 10px 0;
+    }
+    .success { background: #d4edda; color: #155724; }
+    .info { background: #cce5ff; color: #004085; }
+    .error { background: #f8d7da; color: #721c24; }
+    pre {
+      background: #f4f4f4;
+      padding: 15px;
+      border-radius: 4px;
+      overflow-x: auto;
+    }
+    button {
+      background: #007bff;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px;
+    }
+    button:hover { background: #0056b3; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    #log {
+      background: #1e1e1e;
+      color: #d4d4d4;
+      padding: 15px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 13px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .log-entry { margin: 2px 0; }
+    .log-time { color: #6a9955; }
+    .log-info { color: #9cdcfe; }
+    .log-success { color: #4ec9b0; }
+    .log-error { color: #f14c4c; }
+  </style>
+</head>
+<body>
+  <h1>GRC-20 TypeScript SDK - Browser Demo</h1>
+
+  <div class="status info">
+    This demo tests the GRC-20 SDK in a browser environment with lazy loading.
+  </div>
+
+  <h2>Tests</h2>
+  <button onclick="runBasicTest()">Run Basic Test</button>
+  <button onclick="runCodecTest()">Run Codec Test (Lazy Load)</button>
+  <button onclick="runAllTests()">Run All Tests</button>
+  <button onclick="clearLog()">Clear Log</button>
+
+  <h2>Output</h2>
+  <div id="log"></div>
+
+  <script type="module">
+    const logEl = document.getElementById('log');
+
+    function log(message, type = 'info') {
+      const time = new Date().toLocaleTimeString();
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      entry.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-${type}">${message}</span>`;
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    window.clearLog = function() {
+      logEl.innerHTML = '';
+    };
+
+    // Basic test - loads types, builder, util, genesis (no codec)
+    window.runBasicTest = async function() {
+      log('Starting basic test (types, builder, util, genesis)...', 'info');
+      const start = performance.now();
+
+      try {
+        // These are the "core" imports that don't need the codec
+        const [types, builder, util, genesis] = await Promise.all([
+          import('/dist/types/index.js'),
+          import('/dist/builder/index.js'),
+          import('/dist/util/index.js'),
+          import('/dist/genesis/index.js'),
+        ]);
+
+        const loadTime = (performance.now() - start).toFixed(2);
+        log(`Modules loaded in ${loadTime}ms`, 'success');
+
+        // Test ID utilities
+        const id = util.randomId();
+        const formatted = util.formatId(id);
+        log(`Generated random ID: ${formatted}`, 'info');
+
+        const parsed = util.parseId(formatted);
+        log(`Parsed back successfully: ${types.idsEqual(id, parsed)}`, 'success');
+
+        // Test derived UUID
+        const derived = util.derivedUuidFromString('test');
+        log(`Derived UUID from 'test': ${util.formatId(derived)}`, 'info');
+
+        // Test genesis IDs
+        const nameId = genesis.properties.name();
+        log(`Genesis Name property: ${util.formatId(nameId)}`, 'info');
+
+        // Test builder
+        const editId = util.randomId();
+        const entityId = util.randomId();
+        const edit = new builder.EditBuilder(editId)
+          .setName('Browser Test')
+          .setCreatedAt(BigInt(Date.now()) * 1000n)
+          .createEntity(entityId, e => e
+            .text(genesis.properties.name(), 'Alice', undefined)
+            .bool(util.parseId('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'), true)
+          )
+          .build();
+
+        log(`Created edit with ${edit.ops.length} operation(s)`, 'success');
+        log(`Edit name: ${edit.name}`, 'info');
+
+        log('✅ Basic test PASSED', 'success');
+      } catch (error) {
+        log(`❌ Basic test FAILED: ${error.message}`, 'error');
+        console.error(error);
+      }
+    };
+
+    // Codec test - lazy loads the codec module
+    window.runCodecTest = async function() {
+      log('Starting codec test (lazy loading codec module)...', 'info');
+
+      try {
+        // First load the "light" modules
+        const startLight = performance.now();
+        const [types, builder, util, genesis] = await Promise.all([
+          import('/dist/types/index.js'),
+          import('/dist/builder/index.js'),
+          import('/dist/util/index.js'),
+          import('/dist/genesis/index.js'),
+        ]);
+        const lightTime = (performance.now() - startLight).toFixed(2);
+        log(`Light modules loaded in ${lightTime}ms`, 'success');
+
+        // Create an edit
+        const editId = util.randomId();
+        const entityId = util.randomId();
+        const edit = new builder.EditBuilder(editId)
+          .setName('Codec Test')
+          .setCreatedAt(BigInt(Date.now()) * 1000n)
+          .createEntity(entityId, e => e
+            .text(genesis.properties.name(), 'Bob', undefined)
+            .int64(util.parseId('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), 42n, undefined)
+            .float64(util.parseId('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'), 3.14159, undefined)
+          )
+          .build();
+
+        log('Edit created, now lazy loading codec...', 'info');
+
+        // Now lazy load the codec
+        const startCodec = performance.now();
+        const codec = await import('/dist/codec/index.js');
+        const codecTime = (performance.now() - startCodec).toFixed(2);
+        log(`Codec module loaded in ${codecTime}ms`, 'success');
+
+        // Encode
+        const startEncode = performance.now();
+        const encoded = codec.encodeEdit(edit);
+        const encodeTime = (performance.now() - startEncode).toFixed(2);
+        log(`Encoded to ${encoded.length} bytes in ${encodeTime}ms`, 'success');
+
+        // Verify magic bytes
+        const magic = String.fromCharCode(...encoded.slice(0, 4));
+        log(`Magic bytes: ${magic}`, 'info');
+
+        // Decode
+        const startDecode = performance.now();
+        const decoded = codec.decodeEdit(encoded);
+        const decodeTime = (performance.now() - startDecode).toFixed(2);
+        log(`Decoded in ${decodeTime}ms`, 'success');
+
+        // Verify roundtrip
+        if (types.idsEqual(edit.id, decoded.id) &&
+            edit.name === decoded.name &&
+            edit.ops.length === decoded.ops.length) {
+          log('✅ Roundtrip verification PASSED', 'success');
+        } else {
+          log('❌ Roundtrip verification FAILED', 'error');
+        }
+
+        log('✅ Codec test PASSED', 'success');
+      } catch (error) {
+        log(`❌ Codec test FAILED: ${error.message}`, 'error');
+        console.error(error);
+      }
+    };
+
+    // Run all tests
+    window.runAllTests = async function() {
+      log('=== Running All Tests ===', 'info');
+      await runBasicTest();
+      log('---', 'info');
+      await runCodecTest();
+      log('=== All Tests Complete ===', 'info');
+    };
+
+    // Auto-run on load
+    log('GRC-20 Browser Demo loaded. Click a button to run tests.', 'info');
+  </script>
+</body>
+</html>

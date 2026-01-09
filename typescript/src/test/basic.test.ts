@@ -11,6 +11,7 @@ import {
   uniqueRelationId,
   relationEntityId,
   properties,
+  types,
   relationTypes,
   languages,
   DataType,
@@ -82,24 +83,37 @@ describe("ID utilities", () => {
 });
 
 describe("Genesis IDs", () => {
-  it("properties.NAME is deterministic", () => {
-    const id1 = properties.NAME;
-    const id2 = properties.name();
-    expect(idsEqual(id1, id2)).toBe(true);
+  it("properties.NAME matches spec", () => {
+    const id = properties.NAME;
+    expect(formatId(id)).toBe("a126ca530c8e48d5b88882c734c38935");
+    expect(idsEqual(id, properties.name())).toBe(true);
   });
 
-  it("relationTypes.TYPES is deterministic", () => {
-    const id1 = relationTypes.TYPES;
-    const id2 = relationTypes.types();
-    expect(idsEqual(id1, id2)).toBe(true);
+  it("properties.DESCRIPTION matches spec", () => {
+    const id = properties.DESCRIPTION;
+    expect(formatId(id)).toBe("9b1f76ff9711404c861e59dc3fa7d037");
   });
 
-  it("languages.ENGLISH is deterministic", () => {
-    const id1 = languages.ENGLISH;
-    const id2 = languages.english();
-    const id3 = languages.fromCode("en");
+  it("properties.COVER matches spec", () => {
+    const id = properties.COVER;
+    expect(formatId(id)).toBe("34f535072e6b42c5a84443981a77cfa2");
+  });
+
+  it("types.IMAGE matches spec", () => {
+    const id = types.IMAGE;
+    expect(formatId(id)).toBe("f3f790c4c74e4d23a0a91e8ef84e30d9");
+  });
+
+  it("relationTypes.TYPES matches spec", () => {
+    const id = relationTypes.TYPES;
+    expect(formatId(id)).toBe("8f151ba4de204e3c9cb499ddf96f48f1");
+    expect(idsEqual(id, relationTypes.types())).toBe(true);
+  });
+
+  it("languages.english is deterministic", () => {
+    const id1 = languages.english();
+    const id2 = languages.fromCode("en");
     expect(idsEqual(id1, id2)).toBe(true);
-    expect(idsEqual(id1, id3)).toBe(true);
   });
 });
 
@@ -137,7 +151,7 @@ describe("EditBuilder", () => {
       .createEmptyEntity(from)
       .createEmptyEntity(to)
       .createRelationUnique(from, to, relationTypes.types())
-      .createRelationMany(relId, from, to, relationTypes.partOf())
+      .createRelationMany(relId, from, to, relationTypes.types())
       .build();
 
     expect(edit.ops.length).toBe(4);

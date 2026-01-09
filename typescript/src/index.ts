@@ -19,10 +19,10 @@ export * from "./util/index.js";
 export {
   genesisId,
   languageId,
+  languages,
   properties,
   types,
   relationTypes,
-  languages,
 } from "./genesis/index.js";
 
 // Codec

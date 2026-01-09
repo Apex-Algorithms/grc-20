@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>GRC-20 Bundle Test</title>
+</head>
+<body>
+  <h1>GRC-20 Bundle Test</h1>
+  <p>Open the browser console to see results.</p>
+  <div id="output"></div>
+
+  <!-- This loads a pre-bundled version -->
+  <script src="./bundle.js"></script>
+  <script>
+    const out = document.getElementById('output');
+    function log(msg) {
+      console.log(msg);
+      out.innerHTML += msg + '<br>';
+    }
+
+    // Test will run after bundle.js loads and exposes GRC20
+    window.addEventListener('load', async () => {
+      try {
+        const { EditBuilder, encodeEdit, decodeEdit, randomId, formatId, properties, idsEqual } = window.GRC20;
+
+        log('✅ Bundle loaded');
+
+        const id = randomId();
+        log('✅ randomId: ' + formatId(id));
+
+        const edit = new EditBuilder(randomId())
+          .setName('Test')
+          .createEntity(randomId(), e => e.text(properties.name(), 'Alice', undefined))
+          .build();
+        log('✅ EditBuilder works');
+
+        const encoded = encodeEdit(edit);
+        log('✅ Encoded to ' + encoded.length + ' bytes');
+
+        const decoded = decodeEdit(encoded);
+        log('✅ Decoded, name: ' + decoded.name);
+
+        log('🎉 All tests passed!');
+      } catch (e) {
+        log('❌ Error: ' + e.message);
+        console.error(e);
+      }
+    });
+  </script>
+</body>
+</html>
