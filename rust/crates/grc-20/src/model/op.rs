@@ -12,9 +12,11 @@ pub enum Op<'a> {
     CreateEntity(CreateEntity<'a>),
     UpdateEntity(UpdateEntity<'a>),
     DeleteEntity(DeleteEntity),
+    RestoreEntity(RestoreEntity),
     CreateRelation(CreateRelation<'a>),
     UpdateRelation(UpdateRelation<'a>),
     DeleteRelation(DeleteRelation),
+    RestoreRelation(RestoreRelation),
     CreateProperty(CreateProperty),
 }
 
@@ -25,10 +27,12 @@ impl Op<'_> {
             Op::CreateEntity(_) => 1,
             Op::UpdateEntity(_) => 2,
             Op::DeleteEntity(_) => 3,
-            Op::CreateRelation(_) => 4,
-            Op::UpdateRelation(_) => 5,
-            Op::DeleteRelation(_) => 6,
-            Op::CreateProperty(_) => 7,
+            Op::RestoreEntity(_) => 4,
+            Op::CreateRelation(_) => 5,
+            Op::UpdateRelation(_) => 6,
+            Op::DeleteRelation(_) => 7,
+            Op::RestoreRelation(_) => 8,
+            Op::CreateProperty(_) => 9,
         }
     }
 }
@@ -101,10 +105,21 @@ impl<'a> UpdateEntity<'a> {
 
 /// Deletes an entity (spec Section 3.2).
 ///
-/// Appends a tombstone to history. Subsequent updates are ignored.
+/// Transitions the entity to DELETED state. Subsequent updates are ignored
+/// until restored via RestoreEntity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteEntity {
     /// The entity to delete.
+    pub id: Id,
+}
+
+/// Restores a deleted entity (spec Section 3.2).
+///
+/// Transitions a DELETED entity back to ACTIVE state.
+/// If the entity is ACTIVE or does not exist, this is a no-op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreEntity {
+    /// The entity to restore.
     pub id: Id,
 }
 
@@ -190,10 +205,21 @@ pub struct UpdateRelation<'a> {
 
 /// Deletes a relation (spec Section 3.3).
 ///
-/// Appends a tombstone. Does NOT delete the reified entity.
+/// Transitions the relation to DELETED state. Does NOT delete the reified entity.
+/// Subsequent updates are ignored until restored via RestoreRelation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteRelation {
     /// The relation to delete.
+    pub id: Id,
+}
+
+/// Restores a deleted relation (spec Section 3.3).
+///
+/// Transitions a DELETED relation back to ACTIVE state.
+/// If the relation is ACTIVE or does not exist, this is a no-op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreRelation {
+    /// The relation to restore.
     pub id: Id,
 }
 

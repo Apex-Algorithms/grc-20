@@ -8,18 +8,20 @@ use crate::error::{DecodeError, EncodeError};
 use crate::limits::MAX_VALUES_PER_ENTITY;
 use crate::model::{
     CreateEntity, CreateProperty, CreateRelation, DataType, DeleteEntity, DeleteRelation,
-    DictionaryBuilder, Op, PropertyValue, RelationIdMode, UnsetProperty, UpdateEntity, UpdateRelation,
-    WireDictionaries,
+    DictionaryBuilder, Op, PropertyValue, RelationIdMode, RestoreEntity, RestoreRelation,
+    UnsetProperty, UpdateEntity, UpdateRelation, WireDictionaries,
 };
 
-// Op type constants
+// Op type constants (grouped by lifecycle: Create, Update, Delete, Restore)
 const OP_CREATE_ENTITY: u8 = 1;
 const OP_UPDATE_ENTITY: u8 = 2;
 const OP_DELETE_ENTITY: u8 = 3;
-const OP_CREATE_RELATION: u8 = 4;
-const OP_UPDATE_RELATION: u8 = 5;
-const OP_DELETE_RELATION: u8 = 6;
-const OP_CREATE_PROPERTY: u8 = 7;
+const OP_RESTORE_ENTITY: u8 = 4;
+const OP_CREATE_RELATION: u8 = 5;
+const OP_UPDATE_RELATION: u8 = 6;
+const OP_DELETE_RELATION: u8 = 7;
+const OP_RESTORE_RELATION: u8 = 8;
+const OP_CREATE_PROPERTY: u8 = 9;
 
 // UpdateEntity flags
 const FLAG_HAS_SET_PROPERTIES: u8 = 0x01;
@@ -54,10 +56,12 @@ pub fn decode_op<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Resul
     match op_type {
         OP_CREATE_ENTITY => decode_create_entity(reader, dicts),
         OP_UPDATE_ENTITY => decode_update_entity(reader, dicts),
-        OP_DELETE_ENTITY => decode_delete_entity(reader),
+        OP_DELETE_ENTITY => decode_delete_entity(reader, dicts),
+        OP_RESTORE_ENTITY => decode_restore_entity(reader, dicts),
         OP_CREATE_RELATION => decode_create_relation(reader, dicts),
         OP_UPDATE_RELATION => decode_update_relation(reader, dicts),
-        OP_DELETE_RELATION => decode_delete_relation(reader),
+        OP_DELETE_RELATION => decode_delete_relation(reader, dicts),
+        OP_RESTORE_RELATION => decode_restore_relation(reader, dicts),
         OP_CREATE_PROPERTY => decode_create_property(reader),
         _ => Err(DecodeError::InvalidOpType { op_type }),
     }
@@ -169,9 +173,34 @@ fn decode_update_entity<'a>(
 
 fn decode_delete_entity<'a>(
     reader: &mut Reader<'a>,
+    dicts: &WireDictionaries,
 ) -> Result<Op<'a>, DecodeError> {
-    let id = reader.read_id("entity_id")?;
+    let id_index = reader.read_varint("entity_id")? as usize;
+    if id_index >= dicts.objects.len() {
+        return Err(DecodeError::IndexOutOfBounds {
+            dict: "objects",
+            index: id_index,
+            size: dicts.objects.len(),
+        });
+    }
+    let id = dicts.objects[id_index];
     Ok(Op::DeleteEntity(DeleteEntity { id }))
+}
+
+fn decode_restore_entity<'a>(
+    reader: &mut Reader<'a>,
+    dicts: &WireDictionaries,
+) -> Result<Op<'a>, DecodeError> {
+    let id_index = reader.read_varint("entity_id")? as usize;
+    if id_index >= dicts.objects.len() {
+        return Err(DecodeError::IndexOutOfBounds {
+            dict: "objects",
+            index: id_index,
+            size: dicts.objects.len(),
+        });
+    }
+    let id = dicts.objects[id_index];
+    Ok(Op::RestoreEntity(RestoreEntity { id }))
 }
 
 fn decode_create_relation<'a>(
@@ -325,9 +354,34 @@ fn decode_update_relation<'a>(
 
 fn decode_delete_relation<'a>(
     reader: &mut Reader<'a>,
+    dicts: &WireDictionaries,
 ) -> Result<Op<'a>, DecodeError> {
-    let id = reader.read_id("relation_id")?;
+    let id_index = reader.read_varint("relation_id")? as usize;
+    if id_index >= dicts.objects.len() {
+        return Err(DecodeError::IndexOutOfBounds {
+            dict: "objects",
+            index: id_index,
+            size: dicts.objects.len(),
+        });
+    }
+    let id = dicts.objects[id_index];
     Ok(Op::DeleteRelation(DeleteRelation { id }))
+}
+
+fn decode_restore_relation<'a>(
+    reader: &mut Reader<'a>,
+    dicts: &WireDictionaries,
+) -> Result<Op<'a>, DecodeError> {
+    let id_index = reader.read_varint("relation_id")? as usize;
+    if id_index >= dicts.objects.len() {
+        return Err(DecodeError::IndexOutOfBounds {
+            dict: "objects",
+            index: id_index,
+            size: dicts.objects.len(),
+        });
+    }
+    let id = dicts.objects[id_index];
+    Ok(Op::RestoreRelation(RestoreRelation { id }))
 }
 
 fn decode_create_property<'a>(reader: &mut Reader<'a>) -> Result<Op<'a>, DecodeError> {
@@ -357,9 +411,11 @@ pub fn encode_op(
         Op::CreateEntity(ce) => encode_create_entity(writer, ce, dict_builder, property_types),
         Op::UpdateEntity(ue) => encode_update_entity(writer, ue, dict_builder, property_types),
         Op::DeleteEntity(de) => encode_delete_entity(writer, de, dict_builder),
+        Op::RestoreEntity(re) => encode_restore_entity(writer, re, dict_builder),
         Op::CreateRelation(cr) => encode_create_relation(writer, cr, dict_builder),
         Op::UpdateRelation(ur) => encode_update_relation(writer, ur, dict_builder),
         Op::DeleteRelation(dr) => encode_delete_relation(writer, dr, dict_builder),
+        Op::RestoreRelation(rr) => encode_restore_relation(writer, rr, dict_builder),
         Op::CreateProperty(cp) => encode_create_property(writer, cp),
     }
 }
@@ -435,6 +491,17 @@ fn encode_delete_entity(
 ) -> Result<(), EncodeError> {
     writer.write_byte(OP_DELETE_ENTITY);
     let id_index = dict_builder.add_object(de.id);
+    writer.write_varint(id_index as u64);
+    Ok(())
+}
+
+fn encode_restore_entity(
+    writer: &mut Writer,
+    re: &RestoreEntity,
+    dict_builder: &mut DictionaryBuilder,
+) -> Result<(), EncodeError> {
+    writer.write_byte(OP_RESTORE_ENTITY);
+    let id_index = dict_builder.add_object(re.id);
     writer.write_varint(id_index as u64);
     Ok(())
 }
@@ -551,6 +618,17 @@ fn encode_delete_relation(
 ) -> Result<(), EncodeError> {
     writer.write_byte(OP_DELETE_RELATION);
     let id_index = dict_builder.add_object(dr.id);
+    writer.write_varint(id_index as u64);
+    Ok(())
+}
+
+fn encode_restore_relation(
+    writer: &mut Writer,
+    rr: &RestoreRelation,
+    dict_builder: &mut DictionaryBuilder,
+) -> Result<(), EncodeError> {
+    writer.write_byte(OP_RESTORE_RELATION);
+    let id_index = dict_builder.add_object(rr.id);
     writer.write_varint(id_index as u64);
     Ok(())
 }

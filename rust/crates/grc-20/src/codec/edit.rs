@@ -260,6 +260,7 @@ fn op_to_owned(op: Op<'_>) -> Op<'static> {
             unset_properties: ue.unset_properties,
         }),
         Op::DeleteEntity(de) => Op::DeleteEntity(de),
+        Op::RestoreEntity(re) => Op::RestoreEntity(re),
         Op::CreateRelation(cr) => Op::CreateRelation(crate::model::CreateRelation {
             id_mode: cr.id_mode,
             relation_type: cr.relation_type,
@@ -277,6 +278,7 @@ fn op_to_owned(op: Op<'_>) -> Op<'static> {
             position: ur.position.map(|p| Cow::Owned(p.into_owned())),
         }),
         Op::DeleteRelation(dr) => Op::DeleteRelation(dr),
+        Op::RestoreRelation(rr) => Op::RestoreRelation(rr),
         Op::CreateProperty(cp) => Op::CreateProperty(cp),
     }
 }

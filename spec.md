@@ -379,7 +379,29 @@ DeleteEntity {
 }
 ```
 
-Appends tombstone to history. Subsequent updates to this entity are ignored.
+Transitions the entity to DELETED state (tombstoned).
+
+**Tombstone semantics (NORMATIVE):**
+- Once DELETED, subsequent UpdateEntity ops for this entity are ignored.
+- Once DELETED, subsequent CreateEntity ops for this entity are ignored (tombstone absorbs upserts).
+- The entity can only be restored via explicit RestoreEntity.
+- Tombstones are deterministic: all indexers replaying the same log converge on the same DELETED state.
+
+**RestoreEntity:**
+```
+RestoreEntity {
+  id: ID | index
+}
+```
+
+Transitions a DELETED entity back to ACTIVE state.
+
+**Semantics (NORMATIVE):**
+- If the entity is DELETED, restore it to ACTIVE. Property values are preserved (delete hides, restore reveals).
+- If the entity is ACTIVE or does not exist, the op is ignored (no-op).
+- After restore, subsequent updates apply normally.
+
+**Design rationale:** Explicit restore prevents accidental resurrection by stale/offline clients while allowing governance-controlled undo. Random CreateEntity/UpdateEntity cannot bring back deleted entities—only intentional RestoreEntity can.
 
 ### 3.3 Relation Operations
 
@@ -424,7 +446,28 @@ DeleteRelation {
 }
 ```
 
-Appends tombstone to the relation. Subsequent updates ignored.
+Transitions the relation to DELETED state (tombstoned).
+
+**Tombstone semantics (NORMATIVE):**
+- Once DELETED, subsequent UpdateRelation ops for this relation are ignored.
+- Once DELETED, subsequent CreateRelation ops that would produce the same relation ID are ignored (tombstone absorbs).
+- The relation can only be restored via explicit RestoreRelation.
+
+**RestoreRelation:**
+```
+RestoreRelation {
+  id: ID | index
+}
+```
+
+Transitions a DELETED relation back to ACTIVE state.
+
+**Semantics (NORMATIVE):**
+- If the relation is DELETED, restore it to ACTIVE.
+- If the relation is ACTIVE or does not exist, the op is ignored (no-op).
+- After restore, subsequent updates apply normally.
+
+**Unique-mode relation lifecycle:** Because unique-mode relation IDs are derived from `(from, to, type)`, deleting and later wanting to re-add the same relation would produce the same ID. Without RestoreRelation, this would be permanently blocked. RestoreRelation enables the full lifecycle: create → delete → restore → delete → ...
 
 **Reified entity lifecycle (NORMATIVE):** Deleting a relation does NOT delete its reified entity. The entity remains accessible and may hold values, be referenced by other relations, or be explicitly deleted via DeleteEntity. Orphaned reified entities are permitted; applications MAY garbage-collect them at a higher layer.
 
@@ -715,10 +758,12 @@ op_type values:
   1 = CreateEntity
   2 = UpdateEntity
   3 = DeleteEntity
-  4 = CreateRelation
-  5 = UpdateRelation
-  6 = DeleteRelation
-  7 = CreateProperty
+  4 = RestoreEntity
+  5 = CreateRelation
+  6 = UpdateRelation
+  7 = DeleteRelation
+  8 = RestoreRelation
+  9 = CreateProperty
 ```
 
 **CreateEntity:**
@@ -749,6 +794,11 @@ UnsetProperty:
 ```
 
 **DeleteEntity:**
+```
+id: ObjectRef
+```
+
+**RestoreEntity:**
 ```
 id: ObjectRef
 ```
@@ -788,6 +838,11 @@ flags: uint8
 ```
 
 **DeleteRelation:**
+```
+id: ObjectRef
+```
+
+**RestoreRelation:**
 ```
 id: ObjectRef
 ```
