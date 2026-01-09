@@ -1,5 +1,5 @@
-# Data cache (large downloaded files)
-data/
+# Data (large downloaded files)
+out/
 
 # Reference libraries (cloned for local reference)
 reference/

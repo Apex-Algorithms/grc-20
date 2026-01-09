@@ -285,12 +285,27 @@ fn convert_cities_to_edit<'a>(cities: &'a [City]) -> grc_20::Edit<'a> {
 }
 
 fn main() {
-    // Find the data file
+    // Find the data file (look in out/ directory)
     let data_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "../data/cities.json".to_string());
+        .unwrap_or_else(|| "../../../out/cities.json".to_string());
 
     println!("Loading cities from: {}", data_path);
+
+    // Check if file exists, if not try to decompress from data/
+    if !Path::new(&data_path).exists() {
+        let compressed_path = data_path.replace("/out/", "/data/") + ".gz";
+        if Path::new(&compressed_path).exists() {
+            println!("Decompressing {} to {}", compressed_path, data_path);
+            let compressed = fs::read(&compressed_path).expect("Failed to read compressed file");
+            let mut decoder = flate2::read::GzDecoder::new(compressed.as_slice());
+            let mut decompressed = String::new();
+            std::io::Read::read_to_string(&mut decoder, &mut decompressed)
+                .expect("Failed to decompress");
+            fs::create_dir_all(Path::new(&data_path).parent().unwrap()).ok();
+            fs::write(&data_path, &decompressed).expect("Failed to write decompressed file");
+        }
+    }
 
     let json_data = fs::read_to_string(&data_path).expect("Failed to read cities.json");
 
