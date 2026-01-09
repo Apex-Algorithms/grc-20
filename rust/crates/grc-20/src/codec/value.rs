@@ -129,8 +129,14 @@ fn decode_decimal<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Resu
                 return Err(DecodeError::DecimalNotNormalized);
             }
         }
-        DecimalMantissa::Big(_) => {
-            // TODO: full normalization check for big decimals
+        DecimalMantissa::Big(bytes) => {
+            if is_big_mantissa_zero(bytes) {
+                if exponent != 0 {
+                    return Err(DecodeError::DecimalNotNormalized);
+                }
+            } else if is_big_mantissa_divisible_by_10(bytes) {
+                return Err(DecodeError::DecimalNotNormalized);
+            }
         }
     }
 
@@ -150,6 +156,65 @@ fn decode_decimal<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Resu
     };
 
     Ok(Value::Decimal { exponent, mantissa, unit })
+}
+
+/// Checks if a big-endian two's complement mantissa represents zero.
+fn is_big_mantissa_zero(bytes: &[u8]) -> bool {
+    bytes.iter().all(|&b| b == 0)
+}
+
+/// Checks if a big-endian two's complement mantissa is divisible by 10.
+///
+/// A number is divisible by 10 if its remainder when divided by 10 is 0.
+/// For big-endian bytes, we compute: sum(byte[i] * 256^(n-1-i)) mod 10.
+/// Since 256 mod 10 = 6, we can compute iteratively: (carry * 6 + byte) mod 10.
+///
+/// For negative numbers (high bit set), we need to handle two's complement.
+fn is_big_mantissa_divisible_by_10(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return true; // Zero is divisible by 10
+    }
+
+    // Check if negative (high bit set)
+    let is_negative = bytes[0] & 0x80 != 0;
+
+    if is_negative {
+        // For negative two's complement, compute the absolute value first
+        // by inverting bits and adding 1, then check divisibility
+        let abs_mod = twos_complement_abs_mod_10(bytes);
+        abs_mod == 0
+    } else {
+        // Positive: just compute mod 10 directly
+        // 256 mod 10 = 6, so we iterate: remainder = (remainder * 6 + byte) mod 10
+        let mut remainder = 0u32;
+        for &byte in bytes {
+            // remainder * 256 + byte, mod 10
+            // Since 256 = 25 * 10 + 6, we have: (r * 256) mod 10 = (r * 6) mod 10
+            remainder = (remainder * 6 + byte as u32) % 10;
+        }
+        remainder == 0
+    }
+}
+
+/// Computes |x| mod 10 for a negative two's complement number.
+fn twos_complement_abs_mod_10(bytes: &[u8]) -> u32 {
+    // Two's complement negation: invert all bits and add 1
+    // To get |x| mod 10, we compute (-x) mod 10
+    //
+    // For a two's complement negative number x (represented in bytes),
+    // -x = ~x + 1 (bit inversion plus one)
+    //
+    // We compute (inverted bytes) mod 10, then add 1 mod 10
+
+    // First, compute (inverted bytes as big-endian unsigned) mod 10
+    let mut remainder = 0u32;
+    for &byte in bytes {
+        let inverted = !byte;
+        remainder = (remainder * 6 + inverted as u32) % 10;
+    }
+
+    // Add 1 (for two's complement)
+    (remainder + 1) % 10
 }
 
 fn decode_text<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Result<Value<'a>, DecodeError> {
@@ -193,8 +258,126 @@ fn decode_timestamp<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeErro
 
 fn decode_date<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
     let value = reader.read_str(MAX_STRING_LEN, "date")?;
-    // TODO: validate ISO 8601 format
+    validate_iso8601_date(value)?;
     Ok(Value::Date(Cow::Borrowed(value)))
+}
+
+/// Validates an ISO 8601 calendar date string.
+///
+/// Accepts:
+/// - Year only: "2024" or "-0100" (BCE)
+/// - Year-month: "2024-03" or "-0100-03"
+/// - Full date: "2024-03-15" or "-0100-03-15"
+///
+/// Per spec Section 2.4: implementations SHOULD reject clearly malformed dates.
+fn validate_iso8601_date(s: &str) -> Result<(), DecodeError> {
+    if s.is_empty() {
+        return Err(DecodeError::MalformedEncoding {
+            context: "DATE string is empty",
+        });
+    }
+
+    // Handle optional leading '-' for BCE years
+    let (negative, rest) = if let Some(stripped) = s.strip_prefix('-') {
+        (true, stripped)
+    } else {
+        (false, s)
+    };
+
+    // Split by '-' to get components
+    let parts: Vec<&str> = rest.split('-').collect();
+
+    match parts.len() {
+        1 => {
+            // Year only: "2024" or "0100" (with leading '-' = BCE)
+            validate_year_part(parts[0], negative)?;
+        }
+        2 => {
+            // Year-month: "2024-03"
+            validate_year_part(parts[0], negative)?;
+            validate_month_part(parts[1])?;
+        }
+        3 => {
+            // Full date: "2024-03-15"
+            validate_year_part(parts[0], negative)?;
+            let month = validate_month_part(parts[1])?;
+            validate_day_part(parts[2], month)?;
+        }
+        _ => {
+            return Err(DecodeError::MalformedEncoding {
+                context: "DATE has too many components",
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_year_part(s: &str, is_bce: bool) -> Result<u32, DecodeError> {
+    // Year must be at least 4 digits (can be more for far future/past)
+    if s.len() < 4 {
+        return Err(DecodeError::MalformedEncoding {
+            context: "DATE year must be at least 4 digits",
+        });
+    }
+    // Must be all digits
+    if !s.chars().all(|c| c.is_ascii_digit()) {
+        return Err(DecodeError::MalformedEncoding {
+            context: "DATE year contains non-digit characters",
+        });
+    }
+    // BCE years can't be 0000 (there's no year 0 in ISO 8601)
+    if is_bce && s.chars().all(|c| c == '0') {
+        return Err(DecodeError::MalformedEncoding {
+            context: "DATE year 0000 is invalid",
+        });
+    }
+    s.parse::<u32>().map_err(|_| DecodeError::MalformedEncoding {
+        context: "DATE year is not a valid number",
+    })
+}
+
+fn validate_month_part(s: &str) -> Result<u32, DecodeError> {
+    if s.len() != 2 {
+        return Err(DecodeError::MalformedEncoding {
+            context: "DATE month must be 2 digits",
+        });
+    }
+    let month = s.parse::<u32>().map_err(|_| DecodeError::MalformedEncoding {
+        context: "DATE month is not a valid number",
+    })?;
+    if !(1..=12).contains(&month) {
+        return Err(DecodeError::MalformedEncoding {
+            context: "DATE month out of range (must be 01-12)",
+        });
+    }
+    Ok(month)
+}
+
+fn validate_day_part(s: &str, month: u32) -> Result<u32, DecodeError> {
+    if s.len() != 2 {
+        return Err(DecodeError::MalformedEncoding {
+            context: "DATE day must be 2 digits",
+        });
+    }
+    let day = s.parse::<u32>().map_err(|_| DecodeError::MalformedEncoding {
+        context: "DATE day is not a valid number",
+    })?;
+
+    // Max days per month (not checking leap years - that would require year context)
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => 29, // Allow 29 for Feb (leap year possibility)
+        _ => 31, // Already validated month, but be safe
+    };
+
+    if day == 0 || day > max_day {
+        return Err(DecodeError::MalformedEncoding {
+            context: "DATE day out of range",
+        });
+    }
+    Ok(day)
 }
 
 fn decode_point<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
@@ -326,6 +509,7 @@ pub fn encode_value(
             writer.write_signed_varint(*v);
         }
         Value::Date(s) => {
+            validate_iso8601_date_for_encode(s)?;
             writer.write_string(s);
         }
         Value::Point { lat, lon } => {
@@ -383,8 +567,14 @@ fn encode_decimal(
                 return Err(EncodeError::DecimalNotNormalized);
             }
         }
-        DecimalMantissa::Big(_) => {
-            // TODO: full normalization check
+        DecimalMantissa::Big(bytes) => {
+            if is_big_mantissa_zero(bytes) {
+                if exponent != 0 {
+                    return Err(EncodeError::DecimalNotNormalized);
+                }
+            } else if is_big_mantissa_divisible_by_10(bytes) {
+                return Err(EncodeError::DecimalNotNormalized);
+            }
         }
     }
 
@@ -416,6 +606,18 @@ pub fn encode_property_value(
     writer.write_varint(prop_index as u64);
     encode_value(writer, &pv.value, dict_builder)?;
     Ok(())
+}
+
+/// Validates an ISO 8601 date string for encoding.
+fn validate_iso8601_date_for_encode(s: &str) -> Result<(), EncodeError> {
+    validate_iso8601_date(s).map_err(|e| {
+        // Extract the context message from the decode error
+        let reason = match e {
+            DecodeError::MalformedEncoding { context } => context,
+            _ => "invalid format",
+        };
+        EncodeError::InvalidDate { reason }
+    })
 }
 
 /// Validates a position string according to spec rules.
@@ -600,5 +802,155 @@ mod tests {
         let mut dict_builder = DictionaryBuilder::new();
         let mut writer = Writer::new();
         assert!(encode_value(&mut writer, &invalid, &mut dict_builder).is_err());
+    }
+
+    #[test]
+    fn test_date_validation_valid() {
+        // Year only
+        assert!(validate_iso8601_date("2024").is_ok());
+        assert!(validate_iso8601_date("0001").is_ok());
+        assert!(validate_iso8601_date("9999").is_ok());
+
+        // BCE year
+        assert!(validate_iso8601_date("-0100").is_ok());
+        assert!(validate_iso8601_date("-2024").is_ok());
+
+        // Year-month
+        assert!(validate_iso8601_date("2024-01").is_ok());
+        assert!(validate_iso8601_date("2024-12").is_ok());
+        assert!(validate_iso8601_date("-0100-03").is_ok());
+
+        // Full date
+        assert!(validate_iso8601_date("2024-03-15").is_ok());
+        assert!(validate_iso8601_date("2024-02-29").is_ok()); // Leap year possibility
+        assert!(validate_iso8601_date("-0100-03-15").is_ok());
+    }
+
+    #[test]
+    fn test_date_validation_invalid() {
+        // Empty
+        assert!(validate_iso8601_date("").is_err());
+
+        // Too few digits for year
+        assert!(validate_iso8601_date("24").is_err());
+        assert!(validate_iso8601_date("202").is_err());
+
+        // Invalid month
+        assert!(validate_iso8601_date("2024-00").is_err());
+        assert!(validate_iso8601_date("2024-13").is_err());
+
+        // Invalid day
+        assert!(validate_iso8601_date("2024-03-00").is_err());
+        assert!(validate_iso8601_date("2024-03-32").is_err());
+        assert!(validate_iso8601_date("2024-02-30").is_err()); // Feb max is 29
+        assert!(validate_iso8601_date("2024-04-31").is_err()); // April has 30 days
+
+        // BCE year 0 is invalid
+        assert!(validate_iso8601_date("-0000").is_err());
+
+        // Non-numeric
+        assert!(validate_iso8601_date("XXXX").is_err());
+        assert!(validate_iso8601_date("2024-XX").is_err());
+
+        // Too many components
+        assert!(validate_iso8601_date("2024-03-15-00").is_err());
+    }
+
+    #[test]
+    fn test_big_decimal_normalization_helpers() {
+        // Test is_big_mantissa_zero
+        assert!(is_big_mantissa_zero(&[]));
+        assert!(is_big_mantissa_zero(&[0]));
+        assert!(is_big_mantissa_zero(&[0, 0, 0]));
+        assert!(!is_big_mantissa_zero(&[1]));
+        assert!(!is_big_mantissa_zero(&[0, 1]));
+
+        // Test is_big_mantissa_divisible_by_10 for positive numbers
+        // 10 in big-endian = [0x0A]
+        assert!(is_big_mantissa_divisible_by_10(&[0x0A])); // 10
+        assert!(is_big_mantissa_divisible_by_10(&[0x14])); // 20
+        assert!(is_big_mantissa_divisible_by_10(&[0x64])); // 100
+        assert!(is_big_mantissa_divisible_by_10(&[0x01, 0xF4])); // 500
+
+        assert!(!is_big_mantissa_divisible_by_10(&[0x01])); // 1
+        assert!(!is_big_mantissa_divisible_by_10(&[0x07])); // 7
+        assert!(!is_big_mantissa_divisible_by_10(&[0x0B])); // 11
+        assert!(!is_big_mantissa_divisible_by_10(&[0x15])); // 21
+
+        // Test negative numbers (two's complement)
+        // -10 in two's complement (1 byte): 0xF6
+        assert!(is_big_mantissa_divisible_by_10(&[0xF6])); // -10
+        // -20 in two's complement (1 byte): 0xEC
+        assert!(is_big_mantissa_divisible_by_10(&[0xEC])); // -20
+        // -1 in two's complement (1 byte): 0xFF
+        assert!(!is_big_mantissa_divisible_by_10(&[0xFF])); // -1
+        // -7 in two's complement (1 byte): 0xF9
+        assert!(!is_big_mantissa_divisible_by_10(&[0xF9])); // -7
+    }
+
+    #[test]
+    fn test_big_decimal_normalization_encode() {
+        // Valid: mantissa not divisible by 10
+        let valid = Value::Decimal {
+            exponent: 0,
+            mantissa: DecimalMantissa::Big(Cow::Owned(vec![0x07])), // 7
+            unit: None,
+        };
+        let mut dict_builder = DictionaryBuilder::new();
+        let mut writer = Writer::new();
+        assert!(encode_value(&mut writer, &valid, &mut dict_builder).is_ok());
+
+        // Invalid: mantissa is 10 (divisible by 10)
+        let invalid = Value::Decimal {
+            exponent: 0,
+            mantissa: DecimalMantissa::Big(Cow::Owned(vec![0x0A])), // 10
+            unit: None,
+        };
+        let mut dict_builder = DictionaryBuilder::new();
+        let mut writer = Writer::new();
+        assert!(encode_value(&mut writer, &invalid, &mut dict_builder).is_err());
+
+        // Invalid: zero mantissa with non-zero exponent
+        let invalid_zero = Value::Decimal {
+            exponent: 1,
+            mantissa: DecimalMantissa::Big(Cow::Owned(vec![0x00])),
+            unit: None,
+        };
+        let mut dict_builder = DictionaryBuilder::new();
+        let mut writer = Writer::new();
+        assert!(encode_value(&mut writer, &invalid_zero, &mut dict_builder).is_err());
+
+        // Valid: zero mantissa with zero exponent
+        let valid_zero = Value::Decimal {
+            exponent: 0,
+            mantissa: DecimalMantissa::Big(Cow::Owned(vec![0x00])),
+            unit: None,
+        };
+        let mut dict_builder = DictionaryBuilder::new();
+        let mut writer = Writer::new();
+        assert!(encode_value(&mut writer, &valid_zero, &mut dict_builder).is_ok());
+    }
+
+    #[test]
+    fn test_date_roundtrip() {
+        let dicts = WireDictionaries::default();
+        let mut dict_builder = DictionaryBuilder::new();
+
+        for date_str in ["2024", "2024-03", "2024-03-15", "-0100", "-0100-03-15"] {
+            let value = Value::Date(Cow::Owned(date_str.to_string()));
+
+            let mut writer = Writer::new();
+            encode_value(&mut writer, &value, &mut dict_builder).unwrap();
+
+            let mut reader = Reader::new(writer.as_bytes());
+            let decoded = decode_value(&mut reader, DataType::Date, &dicts).unwrap();
+
+            match (&value, &decoded) {
+                (Value::Date(d1), Value::Date(d2)) => {
+                    assert_eq!(d1.as_ref(), d2.as_ref());
+                }
+                _ => panic!("expected Date values"),
+            }
+        }
     }
 }

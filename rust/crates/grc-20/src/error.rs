@@ -177,6 +177,9 @@ pub enum EncodeError {
     #[error("position string length exceeds maximum 64")]
     PositionTooLong,
 
+    #[error("DATE string is not valid ISO 8601: {reason}")]
+    InvalidDate { reason: &'static str },
+
     #[error("batch entity has {actual} values but schema requires {expected}")]
     BatchEntityValueCountMismatch { expected: usize, actual: usize },
 }
