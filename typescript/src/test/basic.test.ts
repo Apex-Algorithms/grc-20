@@ -3,6 +3,13 @@ import {
   EditBuilder,
   encodeEdit,
   decodeEdit,
+  encodeEditCompressed,
+  decodeEditCompressed,
+  encodeEditAuto,
+  decodeEditAuto,
+  isCompressed,
+  preloadCompression,
+  isCompressionReady,
   parseId,
   formatId,
   randomId,
@@ -367,5 +374,194 @@ describe("Codec", () => {
     for (let i = 0; i < encoded1.length; i++) {
       expect(encoded1[i]).toBe(encoded2[i]);
     }
+  });
+});
+
+describe("Compression", () => {
+  it("isCompressed detects GRC2Z magic", () => {
+    const compressed = new Uint8Array([0x47, 0x52, 0x43, 0x32, 0x5a, 0x00]); // "GRC2Z" + data
+    const uncompressed = new Uint8Array([0x47, 0x52, 0x43, 0x32, 0x00]); // "GRC2" + data
+
+    expect(isCompressed(compressed)).toBe(true);
+    expect(isCompressed(uncompressed)).toBe(false);
+  });
+
+  it("isCompressed returns false for short data", () => {
+    expect(isCompressed(new Uint8Array([0x47, 0x52, 0x43, 0x32]))).toBe(false);
+    expect(isCompressed(new Uint8Array([]))).toBe(false);
+  });
+
+  it("encodes and decodes compressed edit", async () => {
+    const editId = randomId();
+    const entityId = randomId();
+
+    const edit = new EditBuilder(editId)
+      .setName("Compressed Test")
+      .setCreatedAt(1234567890000000n)
+      .createEntity(entityId, (e) =>
+        e.text(properties.name(), "Alice", undefined)
+         .text(properties.description(), "A person named Alice with a long description to make compression worthwhile", undefined)
+      )
+      .build();
+
+    const compressed = await encodeEditCompressed(edit);
+
+    // Check magic bytes
+    expect(String.fromCharCode(...compressed.slice(0, 5))).toBe("GRC2Z");
+
+    // Verify it's detected as compressed
+    expect(isCompressed(compressed)).toBe(true);
+
+    // Decode and verify
+    const decoded = await decodeEditCompressed(compressed);
+
+    expect(idsEqual(decoded.id, edit.id)).toBe(true);
+    expect(decoded.name).toBe(edit.name);
+    expect(decoded.createdAt).toBe(edit.createdAt);
+    expect(decoded.ops.length).toBe(edit.ops.length);
+  });
+
+  it("compressed data is smaller than uncompressed for larger edits", async () => {
+    const editId = randomId();
+
+    // Create an edit with repetitive data (good for compression)
+    const builder = new EditBuilder(editId).setName("Large Test");
+
+    for (let i = 0; i < 50; i++) {
+      const entityId = randomId();
+      builder.createEntity(entityId, (e) =>
+        e.text(properties.name(), `Entity number ${i} with some padding text`, undefined)
+         .text(properties.description(), "This is a repeated description that should compress well", undefined)
+      );
+    }
+
+    const edit = builder.build();
+
+    const uncompressed = encodeEdit(edit);
+    const compressed = await encodeEditCompressed(edit);
+
+    // Compressed should be smaller
+    expect(compressed.length).toBeLessThan(uncompressed.length);
+  });
+
+  it("decodeEditAuto handles both formats", async () => {
+    const editId = randomId();
+    const entityId = randomId();
+
+    const edit = new EditBuilder(editId)
+      .setName("Auto Test")
+      .createEntity(entityId, (e) =>
+        e.text(properties.name(), "Test", undefined)
+      )
+      .build();
+
+    const uncompressed = encodeEdit(edit);
+    const compressed = await encodeEditCompressed(edit);
+
+    // Should decode both formats
+    const decoded1 = await decodeEditAuto(uncompressed);
+    const decoded2 = await decodeEditAuto(compressed);
+
+    expect(idsEqual(decoded1.id, edit.id)).toBe(true);
+    expect(idsEqual(decoded2.id, edit.id)).toBe(true);
+    expect(decoded1.name).toBe(edit.name);
+    expect(decoded2.name).toBe(edit.name);
+  });
+
+  it("compressed canonical encoding roundtrips", async () => {
+    const editId = parseId("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")!;
+    const entityId = parseId("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")!;
+
+    const edit = new EditBuilder(editId)
+      .setName("Canonical Compressed Test")
+      .setCreatedAt(1000000n)
+      .createEntity(entityId, (e) =>
+        e.text(properties.name(), "Test", undefined)
+      )
+      .build();
+
+    const compressed = await encodeEditCompressed(edit, { canonical: true });
+    const decoded = await decodeEditCompressed(compressed);
+
+    expect(idsEqual(decoded.id, edit.id)).toBe(true);
+    expect(decoded.name).toBe(edit.name);
+  });
+
+  it("preloadCompression loads WASM", async () => {
+    // After preloading, compression should be ready
+    await preloadCompression();
+    expect(isCompressionReady()).toBe(true);
+  });
+
+  it("encodeEditAuto returns uncompressed for small edits", async () => {
+    const editId = randomId();
+    const entityId = randomId();
+
+    // Create a small edit
+    const edit = new EditBuilder(editId)
+      .setName("Small")
+      .createEmptyEntity(entityId)
+      .build();
+
+    // With default threshold, small edits should not be compressed
+    const encoded = await encodeEditAuto(edit);
+
+    // Should have GRC2 magic (uncompressed)
+    expect(String.fromCharCode(...encoded.slice(0, 4))).toBe("GRC2");
+    expect(isCompressed(encoded)).toBe(false);
+
+    // Should decode correctly
+    const decoded = await decodeEditAuto(encoded);
+    expect(idsEqual(decoded.id, edit.id)).toBe(true);
+  });
+
+  it("encodeEditAuto compresses large edits", async () => {
+    const editId = randomId();
+
+    // Create a large edit
+    const builder = new EditBuilder(editId).setName("Large Auto Test");
+    for (let i = 0; i < 20; i++) {
+      const entityId = randomId();
+      builder.createEntity(entityId, (e) =>
+        e.text(properties.name(), `Entity ${i} with padding`, undefined)
+         .text(properties.description(), "Repeated description for compression", undefined)
+      );
+    }
+    const edit = builder.build();
+
+    // Should be compressed (above default threshold)
+    const encoded = await encodeEditAuto(edit);
+    expect(isCompressed(encoded)).toBe(true);
+
+    // Should decode correctly
+    const decoded = await decodeEditAuto(encoded);
+    expect(idsEqual(decoded.id, edit.id)).toBe(true);
+    expect(decoded.ops.length).toBe(edit.ops.length);
+  });
+
+  it("encodeEditAuto respects threshold option", async () => {
+    const editId = randomId();
+    const entityId = randomId();
+
+    const edit = new EditBuilder(editId)
+      .setName("Threshold Test")
+      .createEntity(entityId, (e) =>
+        e.text(properties.name(), "Test", undefined)
+      )
+      .build();
+
+    // With threshold: 0, should always compress
+    const alwaysCompressed = await encodeEditAuto(edit, { threshold: 0 });
+    expect(isCompressed(alwaysCompressed)).toBe(true);
+
+    // With threshold: Infinity, should never compress
+    const neverCompressed = await encodeEditAuto(edit, { threshold: Infinity });
+    expect(isCompressed(neverCompressed)).toBe(false);
+
+    // Both should decode correctly
+    const decoded1 = await decodeEditAuto(alwaysCompressed);
+    const decoded2 = await decodeEditAuto(neverCompressed);
+    expect(idsEqual(decoded1.id, edit.id)).toBe(true);
+    expect(idsEqual(decoded2.id, edit.id)).toBe(true);
   });
 });

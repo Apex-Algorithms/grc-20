@@ -42,7 +42,8 @@ const decoded = decodeEdit(bytes);
 
 - **Type-safe API** - Full TypeScript definitions
 - **Builder pattern** - Fluent API for constructing edits
-- **Binary codec** - Pure TypeScript encoder/decoder (no WASM)
+- **Binary codec** - Pure TypeScript encoder/decoder
+- **Zstd compression** - Optional WASM-based compression (lazy-loaded)
 - **Tree-shakeable** - Separate entry points for minimal bundles
 - **Cross-platform** - Works in Node.js and browsers
 
@@ -50,24 +51,30 @@ const decoded = decodeEdit(bytes);
 
 | Entry Point | Gzipped |
 |-------------|---------|
-| Full library | ~8.7 KB |
+| Full library | ~12 KB |
 | Types only | ~1.4 KB |
 | Builder only | ~1.2 KB |
-| Codec only | ~4.8 KB |
-| Genesis IDs | ~1.9 KB |
+| Codec only | ~8 KB |
+| Genesis IDs | ~1.7 KB |
 | Utilities | ~1.6 KB |
+| Zstd WASM (lazy) | ~81 KB |
+
+The Zstd WASM module is only loaded when compression functions are used.
 
 ### Lazy Loading
 
 For optimal initial load, import the codec separately:
 
 ```typescript
-// Initial load (~4.6 KB gzipped)
+// Initial load (~4.4 KB gzipped)
 import { EditBuilder, randomId, properties } from "@geoprotocol/grc-20/builder";
 import { properties } from "@geoprotocol/grc-20/genesis";
 
-// Lazy load codec when needed (~4.8 KB gzipped)
+// Lazy load codec when needed (~8 KB gzipped)
 const { encodeEdit } = await import("@geoprotocol/grc-20/codec");
+
+// WASM only loads if you use compression (~81 KB additional)
+const { encodeEditAuto } = await import("@geoprotocol/grc-20/codec");
 ```
 
 ## API Reference
@@ -131,12 +138,63 @@ const edit = new EditBuilder(editId)
 ```typescript
 import { encodeEdit, decodeEdit } from "@geoprotocol/grc-20";
 
-// Encode
+// Encode (uncompressed)
 const bytes = encodeEdit(edit);
 const bytesCanonical = encodeEdit(edit, { canonical: true });
 
-// Decode
+// Decode (uncompressed)
 const edit = decodeEdit(bytes);
+```
+
+### Compression
+
+The library supports Zstd compression via a lazy-loaded WASM module. The WASM is only downloaded when compression functions are first used.
+
+```typescript
+import {
+  preloadCompression,
+  isCompressionReady,
+  encodeEditAuto,
+  decodeEditAuto,
+  encodeEditCompressed,
+  decodeEditCompressed,
+} from "@geoprotocol/grc-20";
+
+// Preload WASM on app startup (recommended)
+await preloadCompression();
+
+// Check if compression is ready
+if (isCompressionReady()) {
+  console.log("Compression ready!");
+}
+
+// Auto encode/decode (recommended for most use cases)
+// Compresses if data > 256 bytes, otherwise uncompressed
+const data = await encodeEditAuto(edit);
+const decoded = await decodeEditAuto(data);
+
+// Control compression threshold
+const data = await encodeEditAuto(edit, { threshold: 0 });       // always compress
+const data = await encodeEditAuto(edit, { threshold: 1024 });    // compress if > 1KB
+const data = await encodeEditAuto(edit, { threshold: Infinity }); // never compress
+
+// Explicit compressed encode/decode
+const compressed = await encodeEditCompressed(edit);
+const decoded = await decodeEditCompressed(compressed);
+```
+
+#### Browser Usage (without bundler)
+
+If using native ES modules without a bundler, add an import map for the WASM dependency:
+
+```html
+<script type="importmap">
+{
+  "imports": {
+    "@bokuweb/zstd-wasm": "https://esm.sh/@bokuweb/zstd-wasm@0.0.27"
+  }
+}
+</script>
 ```
 
 ### ID Utilities
@@ -213,6 +271,9 @@ npm run test:all
 
 # Analyze bundle sizes
 npm run bundle:analyze
+
+# Run performance benchmark
+npm run benchmark
 
 # Run browser demo
 npm run demo

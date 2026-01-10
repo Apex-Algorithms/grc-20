@@ -33,4 +33,15 @@ export {
   Writer,
   Reader,
   DecodeError,
+  // Compression (lazy-loaded WASM)
+  preloadCompression,
+  isCompressionReady,
+  encodeEditAuto,
+  decodeEditAuto,
+  type EncodeAutoOptions,
+  encodeEditCompressed,
+  decodeEditCompressed,
+  isCompressed,
+  compress,
+  decompress,
 } from "./codec/index.js";

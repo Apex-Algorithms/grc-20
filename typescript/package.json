@@ -41,6 +41,7 @@
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "test:all": "npm run test && npm run test:browser",
     "bundle:analyze": "node scripts/bundle-analyze.js",
+    "benchmark": "node scripts/benchmark.js",
     "demo": "npx serve .",
     "lint": "eslint src --ext .ts",
     "prepublishOnly": "npm run build"
@@ -54,6 +55,9 @@
   ],
   "author": "Geo Browser",
   "license": "MIT",
+  "dependencies": {
+    "@bokuweb/zstd-wasm": "^0.0.27"
+  },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@vitest/browser": "^1.2.0",

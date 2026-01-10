@@ -154,6 +154,48 @@ async function main() {
     );
   }
 
+  // Analyze WASM dependency size
+  console.log("\n📦 Zstd WASM Dependency (lazy loaded with compression):\n");
+
+  const wasmPath = join(__dirname, "../node_modules/@bokuweb/zstd-wasm/dist/web/zstd.wasm");
+  const wasmJsPath = join(__dirname, "../node_modules/@bokuweb/zstd-wasm/dist/web/index.web.js");
+
+  if (existsSync(wasmPath)) {
+    const wasmContent = readFileSync(wasmPath);
+    const wasmGzipped = gzipSync(wasmContent);
+
+    // Also measure the JS wrapper
+    let jsSize = { raw: 0, gzip: 0 };
+    try {
+      const wasmJsResult = await esbuild.build({
+        entryPoints: [wasmJsPath],
+        bundle: true,
+        minify: true,
+        format: "esm",
+        write: false,
+        platform: "browser",
+        target: "es2022",
+        external: ["*.wasm"],
+      });
+      const jsContent = wasmJsResult.outputFiles[0].contents;
+      jsSize = { raw: jsContent.length, gzip: gzipSync(jsContent).length };
+    } catch (e) {
+      // Ignore errors
+    }
+
+    console.log("Component".padEnd(25) + "Raw".padStart(12) + "Gzipped".padStart(12));
+    console.log("-".repeat(49));
+    console.log(`${"WASM binary".padEnd(25)}${formatBytes(wasmContent.length).padStart(12)}${formatBytes(wasmGzipped.length).padStart(12)}`);
+    if (jsSize.raw > 0) {
+      console.log(`${"JS wrapper".padEnd(25)}${formatBytes(jsSize.raw).padStart(12)}${formatBytes(jsSize.gzip).padStart(12)}`);
+      console.log("-".repeat(49));
+      console.log(`${"Total (compression)".padEnd(25)}${formatBytes(wasmContent.length + jsSize.raw).padStart(12)}${formatBytes(wasmGzipped.length + jsSize.gzip).padStart(12)}`);
+    }
+
+    console.log("\n💡 Note: WASM is only loaded when compression functions are used.");
+    console.log("   Users who don't use compression won't download the WASM file.");
+  }
+
   // Clean up
   rmSync(outDir, { recursive: true });
 

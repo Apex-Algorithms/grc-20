@@ -4,6 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GRC-20 Browser Demo</title>
+  <!-- Import map for bare specifiers (needed for compression in unbundled browser) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "@bokuweb/zstd-wasm": "https://esm.sh/@bokuweb/zstd-wasm@0.0.27"
+    }
+  }
+  </script>
   <style>
     body {
       font-family: system-ui, -apple-system, sans-serif;
@@ -65,6 +73,7 @@
   <h2>Tests</h2>
   <button onclick="runBasicTest()">Run Basic Test</button>
   <button onclick="runCodecTest()">Run Codec Test (Lazy Load)</button>
+  <button onclick="runCompressionTest()">Run Compression Test (WASM)</button>
   <button onclick="runAllTests()">Run All Tests</button>
   <button onclick="clearLog()">Clear Log</button>
 
@@ -211,14 +220,118 @@
       }
     };
 
+    // Compression test - tests zstd WASM compression with new API
+    window.runCompressionTest = async function() {
+      try {
+        // Load modules
+        const startLoad = performance.now();
+        const [types, builder, util, genesis, codec] = await Promise.all([
+          import('/dist/types/index.js'),
+          import('/dist/builder/index.js'),
+          import('/dist/util/index.js'),
+          import('/dist/genesis/index.js'),
+          import('/dist/codec/index.js'),
+        ]);
+        const loadTime = (performance.now() - startLoad).toFixed(2);
+
+        // Check if WASM was already preloaded
+        if (codec.isCompressionReady()) {
+          log(`Starting compression test (WASM preloaded in ${wasmPreloadTime}ms)`, 'info');
+        } else {
+          log('Starting compression test (WASM loading on-demand)...', 'info');
+        }
+        log(`Modules loaded in ${loadTime}ms`, 'success');
+
+        // Create a larger edit with repetitive data (good for compression)
+        log('Creating edit with 50 entities...', 'info');
+        const editId = util.randomId();
+        const editBuilder = new builder.EditBuilder(editId)
+          .setName('Compression Test')
+          .setCreatedAt(BigInt(Date.now()) * 1000n);
+
+        for (let i = 0; i < 50; i++) {
+          const entityId = util.randomId();
+          editBuilder.createEntity(entityId, e => e
+            .text(genesis.properties.name(), `Entity number ${i} with padding text`, undefined)
+            .text(genesis.properties.description(), 'This description repeats and should compress well', undefined)
+          );
+        }
+        const edit = editBuilder.build();
+        log(`Edit created with ${edit.ops.length} operations`, 'success');
+
+        // Test encodeEditAuto (recommended API)
+        log('Testing encodeEditAuto (auto-selects compression)...', 'info');
+        const startAuto = performance.now();
+        const autoEncoded = await codec.encodeEditAuto(edit);
+        const autoTime = (performance.now() - startAuto).toFixed(2);
+        const wasCompressed = codec.isCompressed(autoEncoded);
+        log(`encodeEditAuto: ${autoEncoded.length} bytes in ${autoTime}ms (compressed: ${wasCompressed})`, 'success');
+
+        // Compare with explicit uncompressed
+        const uncompressed = codec.encodeEdit(edit);
+        log(`Uncompressed: ${uncompressed.length} bytes`, 'info');
+
+        if (wasCompressed) {
+          const savings = ((1 - autoEncoded.length / uncompressed.length) * 100).toFixed(1);
+          log(`Compression savings: ${savings}%`, 'success');
+        }
+
+        // Decode with decodeEditAuto
+        log('Testing decodeEditAuto...', 'info');
+        const startDecode = performance.now();
+        const decoded = await codec.decodeEditAuto(autoEncoded);
+        const decodeTime = (performance.now() - startDecode).toFixed(2);
+        log(`Decoded in ${decodeTime}ms`, 'success');
+
+        // Verify roundtrip
+        if (types.idsEqual(edit.id, decoded.id) &&
+            edit.name === decoded.name &&
+            edit.ops.length === decoded.ops.length) {
+          log('✅ Roundtrip verification PASSED', 'success');
+        } else {
+          log('❌ Roundtrip verification FAILED', 'error');
+        }
+
+        // Test threshold options
+        log('Testing threshold options...', 'info');
+        const alwaysCompressed = await codec.encodeEditAuto(edit, { threshold: 0 });
+        const neverCompressed = await codec.encodeEditAuto(edit, { threshold: Infinity });
+        log(`threshold: 0 → ${alwaysCompressed.length} bytes (compressed: ${codec.isCompressed(alwaysCompressed)})`, 'info');
+        log(`threshold: Infinity → ${neverCompressed.length} bytes (compressed: ${codec.isCompressed(neverCompressed)})`, 'info');
+
+        log('✅ Compression test PASSED', 'success');
+      } catch (error) {
+        log(`❌ Compression test FAILED: ${error.message}`, 'error');
+        console.error(error);
+      }
+    };
+
     // Run all tests
     window.runAllTests = async function() {
       log('=== Running All Tests ===', 'info');
       await runBasicTest();
       log('---', 'info');
       await runCodecTest();
+      log('---', 'info');
+      await runCompressionTest();
       log('=== All Tests Complete ===', 'info');
     };
+
+    // Preload WASM in background on page load using the new API
+    let wasmPreloadTime = null;
+
+    (async function() {
+      log('Preloading compression WASM in background...', 'info');
+      const start = performance.now();
+      try {
+        const codec = await import('/dist/codec/index.js');
+        await codec.preloadCompression();
+        wasmPreloadTime = (performance.now() - start).toFixed(0);
+        log(`✅ WASM preloaded in ${wasmPreloadTime}ms (isCompressionReady: ${codec.isCompressionReady()})`, 'success');
+      } catch (error) {
+        log(`⚠️ WASM preload failed: ${error.message}`, 'error');
+      }
+    })();
 
     // Auto-run on load
     log('GRC-20 Browser Demo loaded. Click a button to run tests.', 'info');
