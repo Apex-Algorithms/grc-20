@@ -147,22 +147,13 @@ pub struct RestoreEntity {
     pub id: Id,
 }
 
-/// Relation ID mode for CreateRelation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RelationIdMode {
-    /// Caller-provided ID. Multiple relations can exist between same endpoints.
-    Many(Id),
-    /// Deterministic ID derived from from_id || to_id || type_id.
-    Unique,
-}
-
 /// Creates a new relation (spec Section 3.3).
 ///
 /// Also implicitly creates the reified entity if it doesn't exist.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateRelation<'a> {
-    /// The relation ID mode.
-    pub id_mode: RelationIdMode,
+    /// The relation's unique identifier.
+    pub id: Id,
     /// The relation type entity ID.
     pub relation_type: Id,
     /// Source entity ID.
@@ -177,27 +168,14 @@ pub struct CreateRelation<'a> {
     pub to_space: Option<Id>,
     /// Optional version (edit ID) to pin target entity.
     pub to_version: Option<Id>,
-    /// Explicit reified entity ID (many mode only).
+    /// Explicit reified entity ID.
     /// If None, entity ID is auto-derived from the relation ID.
-    /// Must be None in unique mode.
     pub entity: Option<Id>,
     /// Optional ordering position (fractional indexing).
     pub position: Option<Cow<'a, str>>,
 }
 
 impl CreateRelation<'_> {
-    /// Computes the actual relation ID.
-    ///
-    /// For many mode, returns the provided ID.
-    /// For unique mode, derives the ID from from || to || type.
-    pub fn relation_id(&self) -> Id {
-        use crate::model::id::unique_relation_id;
-        match &self.id_mode {
-            RelationIdMode::Many(id) => *id,
-            RelationIdMode::Unique => unique_relation_id(&self.from, &self.to, &self.relation_type),
-        }
-    }
-
     /// Computes the reified entity ID.
     ///
     /// If explicit entity is provided, returns it.
@@ -206,7 +184,7 @@ impl CreateRelation<'_> {
         use crate::model::id::relation_entity_id;
         match self.entity {
             Some(id) => id,
-            None => relation_entity_id(&self.relation_id()),
+            None => relation_entity_id(&self.id),
         }
     }
 
@@ -216,15 +194,61 @@ impl CreateRelation<'_> {
     }
 }
 
-/// Updates a relation's position (spec Section 3.3).
+/// Fields that can be unset on a relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnsetRelationField {
+    FromSpace,
+    FromVersion,
+    ToSpace,
+    ToVersion,
+    Position,
+}
+
+/// Updates a relation's mutable fields (spec Section 3.3).
 ///
-/// All other fields (entity, type, from, to, space pins, version pins) are immutable.
-#[derive(Debug, Clone, PartialEq)]
+/// The structural fields (entity, type, from, to) are immutable.
+/// The space pins, version pins, and position can be updated or unset.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct UpdateRelation<'a> {
     /// The relation to update.
     pub id: Id,
-    /// Optional new position for ordering.
+    /// Set space pin for source entity.
+    pub from_space: Option<Id>,
+    /// Set version pin for source entity.
+    pub from_version: Option<Id>,
+    /// Set space pin for target entity.
+    pub to_space: Option<Id>,
+    /// Set version pin for target entity.
+    pub to_version: Option<Id>,
+    /// Set position for ordering.
     pub position: Option<Cow<'a, str>>,
+    /// Fields to clear/unset.
+    pub unset: Vec<UnsetRelationField>,
+}
+
+impl UpdateRelation<'_> {
+    /// Creates a new UpdateRelation for the given relation ID.
+    pub fn new(id: Id) -> Self {
+        Self {
+            id,
+            from_space: None,
+            from_version: None,
+            to_space: None,
+            to_version: None,
+            position: None,
+            unset: Vec::new(),
+        }
+    }
+
+    /// Returns true if this update has no actual changes.
+    pub fn is_empty(&self) -> bool {
+        self.from_space.is_none()
+            && self.from_version.is_none()
+            && self.to_space.is_none()
+            && self.to_version.is_none()
+            && self.position.is_none()
+            && self.unset.is_empty()
+    }
 }
 
 /// Deletes a relation (spec Section 3.3).
@@ -334,57 +358,17 @@ mod tests {
     }
 
     #[test]
-    fn test_relation_id_computation() {
-        use crate::model::id::unique_relation_id;
-
-        let from = [1u8; 16];
-        let to = [2u8; 16];
-        let rel_type = [3u8; 16];
-
-        // Many mode returns the provided ID
-        let many_id = [5u8; 16];
-        let rel_many = CreateRelation {
-            id_mode: RelationIdMode::Many(many_id),
-            relation_type: rel_type,
-            from,
-            to,
-            entity: None,
-            position: None,
-            from_space: None,
-            from_version: None,
-            to_space: None,
-            to_version: None,
-        };
-        assert_eq!(rel_many.relation_id(), many_id);
-
-        // Unique mode derives the ID
-        let rel_unique = CreateRelation {
-            id_mode: RelationIdMode::Unique,
-            relation_type: rel_type,
-            from,
-            to,
-            entity: None,
-            position: None,
-            from_space: None,
-            from_version: None,
-            to_space: None,
-            to_version: None,
-        };
-        assert_eq!(rel_unique.relation_id(), unique_relation_id(&from, &to, &rel_type));
-    }
-
-    #[test]
     fn test_entity_id_derivation() {
         use crate::model::id::relation_entity_id;
 
+        let rel_id = [5u8; 16];
         let from = [1u8; 16];
         let to = [2u8; 16];
         let rel_type = [3u8; 16];
-        let many_id = [5u8; 16];
 
         // Auto-derived entity (entity = None)
         let rel_auto = CreateRelation {
-            id_mode: RelationIdMode::Many(many_id),
+            id: rel_id,
             relation_type: rel_type,
             from,
             to,
@@ -395,13 +379,13 @@ mod tests {
             to_space: None,
             to_version: None,
         };
-        assert_eq!(rel_auto.entity_id(), relation_entity_id(&many_id));
+        assert_eq!(rel_auto.entity_id(), relation_entity_id(&rel_id));
         assert!(!rel_auto.has_explicit_entity());
 
         // Explicit entity
         let explicit_entity = [6u8; 16];
         let rel_explicit = CreateRelation {
-            id_mode: RelationIdMode::Many(many_id),
+            id: rel_id,
             relation_type: rel_type,
             from,
             to,
@@ -414,21 +398,19 @@ mod tests {
         };
         assert_eq!(rel_explicit.entity_id(), explicit_entity);
         assert!(rel_explicit.has_explicit_entity());
+    }
 
-        // Unique mode with auto entity
-        let rel_unique = CreateRelation {
-            id_mode: RelationIdMode::Unique,
-            relation_type: rel_type,
-            from,
-            to,
-            entity: None,
-            position: None,
-            from_space: None,
-            from_version: None,
-            to_space: None,
-            to_version: None,
-        };
-        let expected_rel_id = rel_unique.relation_id();
-        assert_eq!(rel_unique.entity_id(), relation_entity_id(&expected_rel_id));
+    #[test]
+    fn test_update_relation_is_empty() {
+        let update = UpdateRelation::new([0; 16]);
+        assert!(update.is_empty());
+
+        let mut update2 = UpdateRelation::new([0; 16]);
+        update2.from_space = Some([1; 16]);
+        assert!(!update2.is_empty());
+
+        let mut update3 = UpdateRelation::new([0; 16]);
+        update3.unset.push(UnsetRelationField::Position);
+        assert!(!update3.is_empty());
     }
 }

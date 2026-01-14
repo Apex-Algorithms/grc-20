@@ -270,7 +270,7 @@ fn op_to_owned(op: Op<'_>) -> Op<'static> {
         Op::DeleteEntity(de) => Op::DeleteEntity(de),
         Op::RestoreEntity(re) => Op::RestoreEntity(re),
         Op::CreateRelation(cr) => Op::CreateRelation(crate::model::CreateRelation {
-            id_mode: cr.id_mode,
+            id: cr.id,
             relation_type: cr.relation_type,
             from: cr.from,
             to: cr.to,
@@ -283,7 +283,12 @@ fn op_to_owned(op: Op<'_>) -> Op<'static> {
         }),
         Op::UpdateRelation(ur) => Op::UpdateRelation(crate::model::UpdateRelation {
             id: ur.id,
+            from_space: ur.from_space,
+            from_version: ur.from_version,
+            to_space: ur.to_space,
+            to_version: ur.to_version,
             position: ur.position.map(|p| Cow::Owned(p.into_owned())),
+            unset: ur.unset,
         }),
         Op::DeleteRelation(dr) => Op::DeleteRelation(dr),
         Op::RestoreRelation(rr) => Op::RestoreRelation(rr),
@@ -319,9 +324,9 @@ fn value_to_owned(v: crate::model::Value<'_>) -> crate::model::Value<'static> {
             language,
         },
         Value::Bytes(b) => Value::Bytes(Cow::Owned(b.into_owned())),
-        Value::Timestamp(t) => Value::Timestamp(t),
         Value::Date(d) => Value::Date(Cow::Owned(d.into_owned())),
-        Value::Point { lat, lon } => Value::Point { lat, lon },
+        Value::Schedule(s) => Value::Schedule(Cow::Owned(s.into_owned())),
+        Value::Point { lon, lat, alt } => Value::Point { lon, lat, alt },
         Value::Embedding { sub_type, dims, data } => Value::Embedding {
             sub_type,
             dims,

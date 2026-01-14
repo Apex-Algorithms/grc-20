@@ -8,8 +8,8 @@ use crate::error::{DecodeError, EncodeError};
 use crate::limits::MAX_VALUES_PER_ENTITY;
 use crate::model::{
     CreateEntity, CreateProperty, CreateRelation, DataType, DeleteEntity, DeleteRelation,
-    DictionaryBuilder, Op, PropertyValue, RelationIdMode, RestoreEntity, RestoreRelation,
-    UnsetLanguage, UnsetProperty, UpdateEntity, UpdateRelation, WireDictionaries,
+    DictionaryBuilder, Op, PropertyValue, RestoreEntity, RestoreRelation,
+    UnsetLanguage, UnsetProperty, UnsetRelationField, UpdateEntity, UpdateRelation, WireDictionaries,
 };
 
 // Op type constants (grouped by lifecycle: Create, Update, Delete, Restore)
@@ -37,13 +37,21 @@ const FLAG_HAS_ENTITY: u8 = 0x10;
 const FLAG_HAS_POSITION: u8 = 0x20;
 const CREATE_RELATION_RESERVED_MASK: u8 = 0xC0;
 
-// UpdateRelation flags (only position is mutable)
-const UPDATE_FLAG_HAS_POSITION: u8 = 0x01;
-const UPDATE_RELATION_RESERVED_MASK: u8 = 0xFE;
+// UpdateRelation set flags (bit order matches field order in spec Section 6.4)
+const UPDATE_SET_FROM_SPACE: u8 = 0x01;
+const UPDATE_SET_FROM_VERSION: u8 = 0x02;
+const UPDATE_SET_TO_SPACE: u8 = 0x04;
+const UPDATE_SET_TO_VERSION: u8 = 0x08;
+const UPDATE_SET_POSITION: u8 = 0x10;
+const UPDATE_SET_RESERVED_MASK: u8 = 0xE0;
 
-// Relation ID modes
-const MODE_UNIQUE: u8 = 0;
-const MODE_MANY: u8 = 1;
+// UpdateRelation unset flags
+const UPDATE_UNSET_FROM_SPACE: u8 = 0x01;
+const UPDATE_UNSET_FROM_VERSION: u8 = 0x02;
+const UPDATE_UNSET_TO_SPACE: u8 = 0x04;
+const UPDATE_UNSET_TO_VERSION: u8 = 0x08;
+const UPDATE_UNSET_POSITION: u8 = 0x10;
+const UPDATE_UNSET_RESERVED_MASK: u8 = 0xE0;
 
 // =============================================================================
 // DECODING
@@ -210,20 +218,7 @@ fn decode_create_relation<'a>(
     reader: &mut Reader<'a>,
     dicts: &WireDictionaries,
 ) -> Result<Op<'a>, DecodeError> {
-    let mode = reader.read_byte("relation_mode")?;
-
-    let id_mode = match mode {
-        MODE_UNIQUE => RelationIdMode::Unique,
-        MODE_MANY => {
-            let id = reader.read_id("relation_id")?;
-            RelationIdMode::Many(id)
-        }
-        _ => {
-            return Err(DecodeError::MalformedEncoding {
-                context: "invalid relation mode",
-            });
-        }
-    };
+    let id = reader.read_id("relation_id")?;
 
     let type_index = reader.read_varint("relation_type")? as usize;
     if type_index >= dicts.relation_types.len() {
@@ -264,14 +259,6 @@ fn decode_create_relation<'a>(
         });
     }
 
-    // Validate: unique mode must not have explicit entity
-    let has_entity = flags & FLAG_HAS_ENTITY != 0;
-    if mode == MODE_UNIQUE && has_entity {
-        return Err(DecodeError::MalformedEncoding {
-            context: "unique mode relation cannot have explicit entity",
-        });
-    }
-
     // Read optional fields in spec order: from_space, from_version, to_space, to_version, entity, position
     let from_space = if flags & FLAG_HAS_FROM_SPACE != 0 {
         Some(reader.read_id("from_space")?)
@@ -297,7 +284,7 @@ fn decode_create_relation<'a>(
         None
     };
 
-    let entity = if has_entity {
+    let entity = if flags & FLAG_HAS_ENTITY != 0 {
         Some(reader.read_id("entity_id")?)
     } else {
         None
@@ -310,7 +297,7 @@ fn decode_create_relation<'a>(
     };
 
     Ok(Op::CreateRelation(CreateRelation {
-        id_mode,
+        id,
         relation_type,
         from,
         to,
@@ -337,22 +324,79 @@ fn decode_update_relation<'a>(
     }
     let id = dicts.objects[id_index];
 
-    let flags = reader.read_byte("relation_flags")?;
+    let set_flags = reader.read_byte("set_flags")?;
+    let unset_flags = reader.read_byte("unset_flags")?;
 
     // Check reserved bits
-    if flags & UPDATE_RELATION_RESERVED_MASK != 0 {
+    if set_flags & UPDATE_SET_RESERVED_MASK != 0 {
         return Err(DecodeError::ReservedBitsSet {
-            context: "UpdateRelation flags",
+            context: "UpdateRelation set_flags",
+        });
+    }
+    if unset_flags & UPDATE_UNSET_RESERVED_MASK != 0 {
+        return Err(DecodeError::ReservedBitsSet {
+            context: "UpdateRelation unset_flags",
         });
     }
 
-    let position = if flags & UPDATE_FLAG_HAS_POSITION != 0 {
+    // Read set fields
+    let from_space = if set_flags & UPDATE_SET_FROM_SPACE != 0 {
+        Some(reader.read_id("from_space")?)
+    } else {
+        None
+    };
+
+    let from_version = if set_flags & UPDATE_SET_FROM_VERSION != 0 {
+        Some(reader.read_id("from_version")?)
+    } else {
+        None
+    };
+
+    let to_space = if set_flags & UPDATE_SET_TO_SPACE != 0 {
+        Some(reader.read_id("to_space")?)
+    } else {
+        None
+    };
+
+    let to_version = if set_flags & UPDATE_SET_TO_VERSION != 0 {
+        Some(reader.read_id("to_version")?)
+    } else {
+        None
+    };
+
+    let position = if set_flags & UPDATE_SET_POSITION != 0 {
         Some(decode_position(reader)?)
     } else {
         None
     };
 
-    Ok(Op::UpdateRelation(UpdateRelation { id, position }))
+    // Build unset list
+    let mut unset = Vec::new();
+    if unset_flags & UPDATE_UNSET_FROM_SPACE != 0 {
+        unset.push(UnsetRelationField::FromSpace);
+    }
+    if unset_flags & UPDATE_UNSET_FROM_VERSION != 0 {
+        unset.push(UnsetRelationField::FromVersion);
+    }
+    if unset_flags & UPDATE_UNSET_TO_SPACE != 0 {
+        unset.push(UnsetRelationField::ToSpace);
+    }
+    if unset_flags & UPDATE_UNSET_TO_VERSION != 0 {
+        unset.push(UnsetRelationField::ToVersion);
+    }
+    if unset_flags & UPDATE_UNSET_POSITION != 0 {
+        unset.push(UnsetRelationField::Position);
+    }
+
+    Ok(Op::UpdateRelation(UpdateRelation {
+        id,
+        from_space,
+        from_version,
+        to_space,
+        to_version,
+        position,
+        unset,
+    }))
 }
 
 fn decode_delete_relation<'a>(
@@ -522,24 +566,8 @@ fn encode_create_relation(
     cr: &CreateRelation<'_>,
     dict_builder: &mut DictionaryBuilder,
 ) -> Result<(), EncodeError> {
-    // Validate: unique mode must not have explicit entity
-    if matches!(cr.id_mode, RelationIdMode::Unique) && cr.entity.is_some() {
-        return Err(EncodeError::InvalidInput {
-            context: "unique mode relation cannot have explicit entity",
-        });
-    }
-
     writer.write_byte(OP_CREATE_RELATION);
-
-    match &cr.id_mode {
-        RelationIdMode::Unique => {
-            writer.write_byte(MODE_UNIQUE);
-        }
-        RelationIdMode::Many(id) => {
-            writer.write_byte(MODE_MANY);
-            writer.write_id(id);
-        }
-    }
+    writer.write_id(&cr.id);
 
     let type_index = dict_builder.add_relation_type(cr.relation_type);
     writer.write_varint(type_index as u64);
@@ -611,9 +639,51 @@ fn encode_update_relation(
     let id_index = dict_builder.add_object(ur.id);
     writer.write_varint(id_index as u64);
 
-    let flags = if ur.position.is_some() { UPDATE_FLAG_HAS_POSITION } else { 0 };
-    writer.write_byte(flags);
+    // Build set flags
+    let mut set_flags = 0u8;
+    if ur.from_space.is_some() {
+        set_flags |= UPDATE_SET_FROM_SPACE;
+    }
+    if ur.from_version.is_some() {
+        set_flags |= UPDATE_SET_FROM_VERSION;
+    }
+    if ur.to_space.is_some() {
+        set_flags |= UPDATE_SET_TO_SPACE;
+    }
+    if ur.to_version.is_some() {
+        set_flags |= UPDATE_SET_TO_VERSION;
+    }
+    if ur.position.is_some() {
+        set_flags |= UPDATE_SET_POSITION;
+    }
+    writer.write_byte(set_flags);
 
+    // Build unset flags
+    let mut unset_flags = 0u8;
+    for field in &ur.unset {
+        match field {
+            UnsetRelationField::FromSpace => unset_flags |= UPDATE_UNSET_FROM_SPACE,
+            UnsetRelationField::FromVersion => unset_flags |= UPDATE_UNSET_FROM_VERSION,
+            UnsetRelationField::ToSpace => unset_flags |= UPDATE_UNSET_TO_SPACE,
+            UnsetRelationField::ToVersion => unset_flags |= UPDATE_UNSET_TO_VERSION,
+            UnsetRelationField::Position => unset_flags |= UPDATE_UNSET_POSITION,
+        }
+    }
+    writer.write_byte(unset_flags);
+
+    // Write set fields in order
+    if let Some(space) = &ur.from_space {
+        writer.write_id(space);
+    }
+    if let Some(version) = &ur.from_version {
+        writer.write_id(version);
+    }
+    if let Some(space) = &ur.to_space {
+        writer.write_id(space);
+    }
+    if let Some(version) = &ur.to_version {
+        writer.write_id(version);
+    }
     if let Some(pos) = &ur.position {
         validate_position(pos)?;
         writer.write_string(pos);
@@ -716,9 +786,9 @@ mod tests {
 
     #[test]
     fn test_create_relation_roundtrip() {
-        // Test with explicit entity (instance mode)
+        // Test with explicit entity
         let op = Op::CreateRelation(CreateRelation {
-            id_mode: RelationIdMode::Many([10u8; 16]),
+            id: [10u8; 16],
             relation_type: [1u8; 16],
             from: [2u8; 16],
             to: [3u8; 16],
@@ -743,7 +813,7 @@ mod tests {
         // Compare by extracting values
         match (&op, &decoded) {
             (Op::CreateRelation(r1), Op::CreateRelation(r2)) => {
-                assert_eq!(r1.id_mode, r2.id_mode);
+                assert_eq!(r1.id, r2.id);
                 assert_eq!(r1.relation_type, r2.relation_type);
                 assert_eq!(r1.from, r2.from);
                 assert_eq!(r1.to, r2.to);
@@ -762,7 +832,7 @@ mod tests {
     fn test_create_relation_auto_entity_roundtrip() {
         // Test with auto-derived entity (entity = None)
         let op = Op::CreateRelation(CreateRelation {
-            id_mode: RelationIdMode::Many([10u8; 16]),
+            id: [10u8; 16],
             relation_type: [1u8; 16],
             from: [2u8; 16],
             to: [3u8; 16],
@@ -786,7 +856,7 @@ mod tests {
 
         match (&op, &decoded) {
             (Op::CreateRelation(r1), Op::CreateRelation(r2)) => {
-                assert_eq!(r1.id_mode, r2.id_mode);
+                assert_eq!(r1.id, r2.id);
                 assert_eq!(r1.relation_type, r2.relation_type);
                 assert_eq!(r1.from, r2.from);
                 assert_eq!(r1.to, r2.to);
@@ -799,81 +869,9 @@ mod tests {
     }
 
     #[test]
-    fn test_unique_mode_relation() {
-        // Unique mode must use auto-derived entity (entity = None)
-        let op = Op::CreateRelation(CreateRelation {
-            id_mode: RelationIdMode::Unique,
-            relation_type: [1u8; 16],
-            from: [2u8; 16],
-            to: [3u8; 16],
-            entity: None,
-            position: None,
-            from_space: None,
-            from_version: None,
-            to_space: None,
-            to_version: None,
-        });
-
-        let mut dict_builder = DictionaryBuilder::new();
-        let property_types = rustc_hash::FxHashMap::default();
-
-        let mut writer = Writer::new();
-        encode_op(&mut writer, &op, &mut dict_builder, &property_types).unwrap();
-
-        let dicts = dict_builder.build();
-        let mut reader = Reader::new(writer.as_bytes());
-        let decoded = decode_op(&mut reader, &dicts).unwrap();
-
-        // Direct comparison works since no borrowed strings
-        match (&op, &decoded) {
-            (Op::CreateRelation(r1), Op::CreateRelation(r2)) => {
-                assert_eq!(r1.id_mode, r2.id_mode);
-                assert_eq!(r1.relation_type, r2.relation_type);
-                assert_eq!(r1.from, r2.from);
-                assert_eq!(r1.to, r2.to);
-                assert_eq!(r1.entity, r2.entity);
-                assert!(r1.entity.is_none());
-                assert!(r1.position.is_none() && r2.position.is_none());
-            }
-            _ => panic!("expected CreateRelation"),
-        }
-    }
-
-    #[test]
-    fn test_unique_mode_with_explicit_entity_rejected() {
-        // Unique mode with explicit entity should be rejected
-        let op = Op::CreateRelation(CreateRelation {
-            id_mode: RelationIdMode::Unique,
-            relation_type: [1u8; 16],
-            from: [2u8; 16],
-            to: [3u8; 16],
-            entity: Some([4u8; 16]), // Invalid: explicit entity in unique mode
-            position: None,
-            from_space: None,
-            from_version: None,
-            to_space: None,
-            to_version: None,
-        });
-
-        let mut dict_builder = DictionaryBuilder::new();
-        let property_types = rustc_hash::FxHashMap::default();
-
-        let mut writer = Writer::new();
-        let result = encode_op(&mut writer, &op, &mut dict_builder, &property_types);
-
-        assert!(result.is_err());
-        match result {
-            Err(crate::error::EncodeError::InvalidInput { context }) => {
-                assert!(context.contains("unique mode"));
-            }
-            _ => panic!("expected InvalidInput error"),
-        }
-    }
-
-    #[test]
     fn test_create_relation_with_versions() {
         let op = Op::CreateRelation(CreateRelation {
-            id_mode: RelationIdMode::Many([10u8; 16]),
+            id: [10u8; 16],
             relation_type: [1u8; 16],
             from: [2u8; 16],
             to: [3u8; 16],
@@ -897,7 +895,7 @@ mod tests {
 
         match (&op, &decoded) {
             (Op::CreateRelation(r1), Op::CreateRelation(r2)) => {
-                assert_eq!(r1.id_mode, r2.id_mode);
+                assert_eq!(r1.id, r2.id);
                 assert_eq!(r1.relation_type, r2.relation_type);
                 assert_eq!(r1.from, r2.from);
                 assert_eq!(r1.to, r2.to);
@@ -913,9 +911,15 @@ mod tests {
 
     #[test]
     fn test_update_relation_roundtrip() {
+        // Test with all set fields
         let op = Op::UpdateRelation(UpdateRelation {
             id: [1u8; 16],
+            from_space: Some([2u8; 16]),
+            from_version: Some([3u8; 16]),
+            to_space: Some([4u8; 16]),
+            to_version: Some([5u8; 16]),
             position: Some(Cow::Owned("xyz".to_string())),
+            unset: vec![],
         });
 
         let mut dict_builder = DictionaryBuilder::new();
@@ -932,10 +936,56 @@ mod tests {
         match (&op, &decoded) {
             (Op::UpdateRelation(r1), Op::UpdateRelation(r2)) => {
                 assert_eq!(r1.id, r2.id);
+                assert_eq!(r1.from_space, r2.from_space);
+                assert_eq!(r1.from_version, r2.from_version);
+                assert_eq!(r1.to_space, r2.to_space);
+                assert_eq!(r1.to_version, r2.to_version);
                 match (&r1.position, &r2.position) {
                     (Some(p1), Some(p2)) => assert_eq!(p1.as_ref(), p2.as_ref()),
                     (None, None) => {}
                     _ => panic!("position mismatch"),
+                }
+                assert_eq!(r1.unset, r2.unset);
+            }
+            _ => panic!("expected UpdateRelation"),
+        }
+    }
+
+    #[test]
+    fn test_update_relation_with_unset() {
+        // Test with unset fields
+        let op = Op::UpdateRelation(UpdateRelation {
+            id: [1u8; 16],
+            from_space: None,
+            from_version: None,
+            to_space: None,
+            to_version: None,
+            position: None,
+            unset: vec![
+                UnsetRelationField::FromSpace,
+                UnsetRelationField::ToVersion,
+                UnsetRelationField::Position,
+            ],
+        });
+
+        let mut dict_builder = DictionaryBuilder::new();
+        dict_builder.add_object([1u8; 16]); // Pre-add the relation ID
+        let property_types = rustc_hash::FxHashMap::default();
+
+        let mut writer = Writer::new();
+        encode_op(&mut writer, &op, &mut dict_builder, &property_types).unwrap();
+
+        let dicts = dict_builder.build();
+        let mut reader = Reader::new(writer.as_bytes());
+        let decoded = decode_op(&mut reader, &dicts).unwrap();
+
+        match (&op, &decoded) {
+            (Op::UpdateRelation(r1), Op::UpdateRelation(r2)) => {
+                assert_eq!(r1.id, r2.id);
+                // Check that unset fields are preserved (order may differ due to bit decoding)
+                assert_eq!(r1.unset.len(), r2.unset.len());
+                for field in &r1.unset {
+                    assert!(r2.unset.contains(field), "missing unset field: {:?}", field);
                 }
             }
             _ => panic!("expected UpdateRelation"),

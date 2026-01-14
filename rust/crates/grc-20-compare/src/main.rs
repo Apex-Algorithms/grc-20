@@ -7,7 +7,16 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use grc_20::{DataType, EditBuilder, EntityBuilder};
+use grc_20::{DataType, EditBuilder, EntityBuilder, Id, derived_uuid};
+
+/// Creates a deterministic relation ID from from+to+type (to maintain same behavior as removed unique mode).
+fn make_relation_id(from: Id, to: Id, rel_type: Id) -> Id {
+    let mut input = [0u8; 48];
+    input[0..16].copy_from_slice(&from);
+    input[16..32].copy_from_slice(&to);
+    input[32..48].copy_from_slice(&rel_type);
+    derived_uuid(&input)
+}
 use prost::Message;
 use serde::Deserialize;
 
@@ -200,7 +209,7 @@ fn build_city_entity_grc20<'a>(city: &'a City) -> EntityBuilder<'a> {
     }
 
     if let (Ok(lat), Ok(lon)) = (city.latitude.parse::<f64>(), city.longitude.parse::<f64>()) {
-        builder = builder.point(props::LOCATION, lat, lon);
+        builder = builder.point(props::LOCATION, lon, lat, None);
     }
 
     if let Some(ref tz) = city.timezone {
@@ -263,7 +272,10 @@ fn benchmark_grc20(cities: &[City], iterations: u32) -> BenchResult {
                     e.text(props::NAME, city.country_name.as_str(), None)
                         .text(props::CODE, city.country_code.as_str(), None)
                 })
-                .create_relation_unique(country_id, types::COUNTRY, rel_types::TYPES);
+                .create_relation_simple(
+                    make_relation_id(country_id, types::COUNTRY, rel_types::TYPES),
+                    country_id, types::COUNTRY, rel_types::TYPES
+                );
         }
 
         if created_states.insert(city.state_id) {
@@ -272,15 +284,30 @@ fn benchmark_grc20(cities: &[City], iterations: u32) -> BenchResult {
                     e.text(props::NAME, city.state_name.as_str(), None)
                         .text(props::CODE, city.state_code.as_str(), None)
                 })
-                .create_relation_unique(state_id, types::STATE, rel_types::TYPES)
-                .create_relation_unique(state_id, country_id, rel_types::IN_COUNTRY);
+                .create_relation_simple(
+                    make_relation_id(state_id, types::STATE, rel_types::TYPES),
+                    state_id, types::STATE, rel_types::TYPES
+                )
+                .create_relation_simple(
+                    make_relation_id(state_id, country_id, rel_types::IN_COUNTRY),
+                    state_id, country_id, rel_types::IN_COUNTRY
+                );
         }
 
         builder = builder
             .create_entity(city_id, |_| build_city_entity_grc20(city))
-            .create_relation_unique(city_id, types::CITY, rel_types::TYPES)
-            .create_relation_unique(city_id, state_id, rel_types::IN_STATE)
-            .create_relation_unique(city_id, country_id, rel_types::IN_COUNTRY);
+            .create_relation_simple(
+                make_relation_id(city_id, types::CITY, rel_types::TYPES),
+                city_id, types::CITY, rel_types::TYPES
+            )
+            .create_relation_simple(
+                make_relation_id(city_id, state_id, rel_types::IN_STATE),
+                city_id, state_id, rel_types::IN_STATE
+            )
+            .create_relation_simple(
+                make_relation_id(city_id, country_id, rel_types::IN_COUNTRY),
+                city_id, country_id, rel_types::IN_COUNTRY
+            );
     }
 
     let edit = builder.build();

@@ -16,8 +16,8 @@ pub enum DataType {
     Decimal = 4,
     Text = 5,
     Bytes = 6,
-    Timestamp = 7,
-    Date = 8,
+    Date = 7,
+    Schedule = 8,
     Point = 9,
     Embedding = 10,
 }
@@ -32,8 +32,8 @@ impl DataType {
             4 => Some(DataType::Decimal),
             5 => Some(DataType::Text),
             6 => Some(DataType::Bytes),
-            7 => Some(DataType::Timestamp),
-            8 => Some(DataType::Date),
+            7 => Some(DataType::Date),
+            8 => Some(DataType::Schedule),
             9 => Some(DataType::Point),
             10 => Some(DataType::Embedding),
             _ => None,
@@ -145,18 +145,20 @@ pub enum Value<'a> {
     /// Opaque byte array.
     Bytes(Cow<'a, [u8]>),
 
-    /// Microseconds since Unix epoch.
-    Timestamp(i64),
-
     /// ISO 8601 date string (variable precision).
     Date(Cow<'a, str>),
 
-    /// WGS84 geographic coordinate.
+    /// RFC 5545 iCalendar schedule string.
+    Schedule(Cow<'a, str>),
+
+    /// WGS84 geographic coordinate with optional altitude.
     Point {
-        /// Latitude in degrees (-90 to +90).
-        lat: f64,
         /// Longitude in degrees (-180 to +180).
         lon: f64,
+        /// Latitude in degrees (-90 to +90).
+        lat: f64,
+        /// Altitude in meters above WGS84 ellipsoid (optional).
+        alt: Option<f64>,
     },
 
     /// Dense vector for semantic similarity search.
@@ -178,8 +180,8 @@ impl Value<'_> {
             Value::Decimal { .. } => DataType::Decimal,
             Value::Text { .. } => DataType::Text,
             Value::Bytes(_) => DataType::Bytes,
-            Value::Timestamp(_) => DataType::Timestamp,
             Value::Date(_) => DataType::Date,
+            Value::Schedule(_) => DataType::Schedule,
             Value::Point { .. } => DataType::Point,
             Value::Embedding { .. } => DataType::Embedding,
         }
@@ -205,15 +207,20 @@ impl Value<'_> {
                     return Some("DECIMAL mantissa has trailing zeros (not normalized)");
                 }
             }
-            Value::Point { lat, lon } => {
-                if *lat < -90.0 || *lat > 90.0 {
-                    return Some("latitude out of range [-90, +90]");
-                }
+            Value::Point { lon, lat, alt } => {
                 if *lon < -180.0 || *lon > 180.0 {
                     return Some("longitude out of range [-180, +180]");
                 }
-                if lat.is_nan() || lon.is_nan() {
+                if *lat < -90.0 || *lat > 90.0 {
+                    return Some("latitude out of range [-90, +90]");
+                }
+                if lon.is_nan() || lat.is_nan() {
                     return Some("NaN is not allowed in Point coordinates");
+                }
+                if let Some(a) = alt {
+                    if a.is_nan() {
+                        return Some("NaN is not allowed in Point altitude");
+                    }
                 }
             }
             Value::Embedding {
@@ -282,17 +289,15 @@ mod tests {
 
     #[test]
     fn test_value_validation_point() {
-        assert!(Value::Point { lat: 91.0, lon: 0.0 }.validate().is_some());
-        assert!(Value::Point { lat: -91.0, lon: 0.0 }.validate().is_some());
-        assert!(Value::Point { lat: 0.0, lon: 181.0 }.validate().is_some());
-        assert!(Value::Point { lat: 0.0, lon: -181.0 }.validate().is_some());
-        assert!(Value::Point { lat: 90.0, lon: 180.0 }.validate().is_none());
-        assert!(Value::Point {
-            lat: -90.0,
-            lon: -180.0
-        }
-        .validate()
-        .is_none());
+        assert!(Value::Point { lon: 0.0, lat: 91.0, alt: None }.validate().is_some());
+        assert!(Value::Point { lon: 0.0, lat: -91.0, alt: None }.validate().is_some());
+        assert!(Value::Point { lon: 181.0, lat: 0.0, alt: None }.validate().is_some());
+        assert!(Value::Point { lon: -181.0, lat: 0.0, alt: None }.validate().is_some());
+        assert!(Value::Point { lon: 180.0, lat: 90.0, alt: None }.validate().is_none());
+        assert!(Value::Point { lon: -180.0, lat: -90.0, alt: None }.validate().is_none());
+        // With altitude
+        assert!(Value::Point { lon: 0.0, lat: 0.0, alt: Some(1000.0) }.validate().is_none());
+        assert!(Value::Point { lon: 0.0, lat: 0.0, alt: Some(f64::NAN) }.validate().is_some());
     }
 
     #[test]

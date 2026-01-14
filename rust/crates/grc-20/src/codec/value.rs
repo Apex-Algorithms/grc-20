@@ -29,8 +29,8 @@ pub fn decode_value<'a>(
         DataType::Decimal => decode_decimal(reader, dicts),
         DataType::Text => decode_text(reader, dicts),
         DataType::Bytes => decode_bytes(reader),
-        DataType::Timestamp => decode_timestamp(reader),
         DataType::Date => decode_date(reader),
+        DataType::Schedule => decode_schedule(reader),
         DataType::Point => decode_point(reader),
         DataType::Embedding => decode_embedding(reader),
     }
@@ -251,11 +251,6 @@ fn decode_bytes<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
     Ok(Value::Bytes(Cow::Borrowed(bytes)))
 }
 
-fn decode_timestamp<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
-    let value = reader.read_signed_varint("timestamp")?;
-    Ok(Value::Timestamp(value))
-}
-
 fn decode_date<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
     let value = reader.read_str(MAX_STRING_LEN, "date")?;
     validate_iso8601_date(value)?;
@@ -380,19 +375,48 @@ fn validate_day_part(s: &str, month: u32) -> Result<u32, DecodeError> {
     Ok(day)
 }
 
+fn decode_schedule<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
+    let value = reader.read_str(MAX_STRING_LEN, "schedule")?;
+    // RFC 5545 iCalendar format - basic validation
+    // Full validation would require a complete iCalendar parser
+    Ok(Value::Schedule(Cow::Borrowed(value)))
+}
+
 fn decode_point<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
-    let lat = reader.read_f64("point.lat")?;
+    let ordinate_count = reader.read_byte("point.ordinate_count")?;
+
+    if ordinate_count != 2 && ordinate_count != 3 {
+        return Err(DecodeError::MalformedEncoding {
+            context: "POINT ordinate_count must be 2 or 3",
+        });
+    }
+
+    // Read in wire order: longitude, latitude, altitude (optional)
     let lon = reader.read_f64("point.lon")?;
+    let lat = reader.read_f64("point.lat")?;
+    let alt = if ordinate_count == 3 {
+        Some(reader.read_f64("point.alt")?)
+    } else {
+        None
+    };
 
     // Validate bounds
-    if !(-90.0..=90.0).contains(&lat) {
-        return Err(DecodeError::LatitudeOutOfRange { lat });
-    }
     if !(-180.0..=180.0).contains(&lon) {
         return Err(DecodeError::LongitudeOutOfRange { lon });
     }
+    if !(-90.0..=90.0).contains(&lat) {
+        return Err(DecodeError::LatitudeOutOfRange { lat });
+    }
+    if lon.is_nan() || lat.is_nan() {
+        return Err(DecodeError::FloatIsNan);
+    }
+    if let Some(a) = alt {
+        if a.is_nan() {
+            return Err(DecodeError::FloatIsNan);
+        }
+    }
 
-    Ok(Value::Point { lat, lon })
+    Ok(Value::Point { lon, lat, alt })
 }
 
 fn decode_embedding<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
@@ -505,25 +529,38 @@ pub fn encode_value(
         Value::Bytes(bytes) => {
             writer.write_bytes_prefixed(bytes);
         }
-        Value::Timestamp(v) => {
-            writer.write_signed_varint(*v);
-        }
         Value::Date(s) => {
             validate_iso8601_date_for_encode(s)?;
             writer.write_string(s);
         }
-        Value::Point { lat, lon } => {
-            if *lat < -90.0 || *lat > 90.0 {
-                return Err(EncodeError::LatitudeOutOfRange { lat: *lat });
-            }
+        Value::Schedule(s) => {
+            // RFC 5545 iCalendar format
+            writer.write_string(s);
+        }
+        Value::Point { lon, lat, alt } => {
             if *lon < -180.0 || *lon > 180.0 {
                 return Err(EncodeError::LongitudeOutOfRange { lon: *lon });
+            }
+            if *lat < -90.0 || *lat > 90.0 {
+                return Err(EncodeError::LatitudeOutOfRange { lat: *lat });
             }
             if lat.is_nan() || lon.is_nan() {
                 return Err(EncodeError::FloatIsNan);
             }
-            writer.write_f64(*lat);
+            if let Some(a) = alt {
+                if a.is_nan() {
+                    return Err(EncodeError::FloatIsNan);
+                }
+            }
+            // Write ordinate_count: 2 for 2D, 3 for 3D
+            let ordinate_count = if alt.is_some() { 3u8 } else { 2u8 };
+            writer.write_byte(ordinate_count);
+            // Write in wire order: longitude, latitude, altitude (optional)
             writer.write_f64(*lon);
+            writer.write_f64(*lat);
+            if let Some(a) = alt {
+                writer.write_f64(*a);
+            }
         }
         Value::Embedding { sub_type, dims, data } => {
             let expected = sub_type.bytes_for_dims(*dims);
@@ -728,7 +765,8 @@ mod tests {
 
     #[test]
     fn test_point_roundtrip() {
-        let value = Value::Point { lat: 37.7749, lon: -122.4194 };
+        // 2D point (no altitude)
+        let value = Value::Point { lon: -122.4194, lat: 37.7749, alt: None };
         let dicts = WireDictionaries::default();
         let mut dict_builder = DictionaryBuilder::new();
 
@@ -739,16 +777,64 @@ mod tests {
         let decoded = decode_value(&mut reader, DataType::Point, &dicts).unwrap();
 
         assert_eq!(value, decoded);
+
+        // 3D point (with altitude)
+        let value_3d = Value::Point { lon: -122.4194, lat: 37.7749, alt: Some(100.0) };
+        let mut dict_builder = DictionaryBuilder::new();
+
+        let mut writer = Writer::new();
+        encode_value(&mut writer, &value_3d, &mut dict_builder).unwrap();
+
+        let mut reader = Reader::new(writer.as_bytes());
+        let decoded_3d = decode_value(&mut reader, DataType::Point, &dicts).unwrap();
+
+        assert_eq!(value_3d, decoded_3d);
     }
 
     #[test]
     fn test_point_validation() {
         // Latitude out of range
-        let value = Value::Point { lat: 91.0, lon: 0.0 };
+        let value = Value::Point { lon: 0.0, lat: 91.0, alt: None };
         let mut dict_builder = DictionaryBuilder::new();
         let mut writer = Writer::new();
         let result = encode_value(&mut writer, &value, &mut dict_builder);
         assert!(result.is_err());
+
+        // Longitude out of range
+        let value = Value::Point { lon: 181.0, lat: 0.0, alt: None };
+        let mut dict_builder = DictionaryBuilder::new();
+        let mut writer = Writer::new();
+        let result = encode_value(&mut writer, &value, &mut dict_builder);
+        assert!(result.is_err());
+
+        // NaN in altitude
+        let value = Value::Point { lon: 0.0, lat: 0.0, alt: Some(f64::NAN) };
+        let mut dict_builder = DictionaryBuilder::new();
+        let mut writer = Writer::new();
+        let result = encode_value(&mut writer, &value, &mut dict_builder);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_schedule_roundtrip() {
+        let dicts = WireDictionaries::default();
+        let mut dict_builder = DictionaryBuilder::new();
+
+        // Simple iCalendar event (single occurrence)
+        let value = Value::Schedule(Cow::Owned("BEGIN:VEVENT\r\nDTSTART:20240315T090000Z\r\nDTEND:20240315T100000Z\r\nEND:VEVENT".to_string()));
+
+        let mut writer = Writer::new();
+        encode_value(&mut writer, &value, &mut dict_builder).unwrap();
+
+        let mut reader = Reader::new(writer.as_bytes());
+        let decoded = decode_value(&mut reader, DataType::Schedule, &dicts).unwrap();
+
+        match (&value, &decoded) {
+            (Value::Schedule(s1), Value::Schedule(s2)) => {
+                assert_eq!(s1.as_ref(), s2.as_ref());
+            }
+            _ => panic!("expected Schedule values"),
+        }
     }
 
     #[test]

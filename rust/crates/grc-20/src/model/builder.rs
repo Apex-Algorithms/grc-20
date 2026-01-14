@@ -24,7 +24,7 @@ use std::borrow::Cow;
 
 use crate::model::{
     CreateEntity, CreateProperty, CreateRelation, DataType, DeleteEntity, DeleteRelation,
-    Edit, Id, Op, PropertyValue, RelationIdMode, RestoreEntity, RestoreRelation,
+    Edit, Id, Op, PropertyValue, RestoreEntity, RestoreRelation, UnsetRelationField,
     UnsetLanguage, UnsetProperty, UpdateEntity, UpdateRelation, Value,
 };
 
@@ -151,30 +151,8 @@ impl<'a> EditBuilder<'a> {
     // Relation Operations
     // =========================================================================
 
-    /// Adds a CreateRelation operation in unique mode (ID derived from endpoints + type).
-    pub fn create_relation_unique(
-        mut self,
-        from: Id,
-        to: Id,
-        relation_type: Id,
-    ) -> Self {
-        self.ops.push(Op::CreateRelation(CreateRelation {
-            id_mode: RelationIdMode::Unique,
-            relation_type,
-            from,
-            to,
-            entity: None,
-            position: None,
-            from_space: None,
-            from_version: None,
-            to_space: None,
-            to_version: None,
-        }));
-        self
-    }
-
-    /// Adds a CreateRelation operation in many mode (explicit ID).
-    pub fn create_relation_many(
+    /// Adds a CreateRelation operation with an explicit ID.
+    pub fn create_relation_simple(
         mut self,
         id: Id,
         from: Id,
@@ -182,7 +160,7 @@ impl<'a> EditBuilder<'a> {
         relation_type: Id,
     ) -> Self {
         self.ops.push(Op::CreateRelation(CreateRelation {
-            id_mode: RelationIdMode::Many(id),
+            id,
             relation_type,
             from,
             to,
@@ -208,9 +186,35 @@ impl<'a> EditBuilder<'a> {
         self
     }
 
-    /// Adds an UpdateRelation operation (can only update position).
-    pub fn update_relation(mut self, id: Id, position: Option<Cow<'a, str>>) -> Self {
-        self.ops.push(Op::UpdateRelation(UpdateRelation { id, position }));
+    /// Adds an UpdateRelation operation using a builder function.
+    pub fn update_relation<F>(mut self, id: Id, f: F) -> Self
+    where
+        F: FnOnce(UpdateRelationBuilder<'a>) -> UpdateRelationBuilder<'a>,
+    {
+        let builder = f(UpdateRelationBuilder::new(id));
+        self.ops.push(Op::UpdateRelation(UpdateRelation {
+            id: builder.id,
+            from_space: builder.from_space,
+            from_version: builder.from_version,
+            to_space: builder.to_space,
+            to_version: builder.to_version,
+            position: builder.position,
+            unset: builder.unset,
+        }));
+        self
+    }
+
+    /// Adds an UpdateRelation operation to only update the position.
+    pub fn update_relation_position(mut self, id: Id, position: Option<Cow<'a, str>>) -> Self {
+        self.ops.push(Op::UpdateRelation(UpdateRelation {
+            id,
+            from_space: None,
+            from_version: None,
+            to_space: None,
+            to_version: None,
+            position,
+            unset: vec![],
+        }));
         self
     }
 
@@ -334,11 +338,11 @@ impl<'a> EntityBuilder<'a> {
         self
     }
 
-    /// Adds a POINT value (latitude, longitude).
-    pub fn point(mut self, property: Id, lat: f64, lon: f64) -> Self {
+    /// Adds a POINT value (longitude, latitude, optional altitude).
+    pub fn point(mut self, property: Id, lon: f64, lat: f64, alt: Option<f64>) -> Self {
         self.values.push(PropertyValue {
             property,
-            value: Value::Point { lat, lon },
+            value: Value::Point { lon, lat, alt },
         });
         self
     }
@@ -352,11 +356,11 @@ impl<'a> EntityBuilder<'a> {
         self
     }
 
-    /// Adds a TIMESTAMP value (microseconds since Unix epoch).
-    pub fn timestamp(mut self, property: Id, micros: i64) -> Self {
+    /// Adds a SCHEDULE value (RFC 5545 iCalendar format).
+    pub fn schedule(mut self, property: Id, value: impl Into<Cow<'a, str>>) -> Self {
         self.values.push(PropertyValue {
             property,
-            value: Value::Timestamp(micros),
+            value: Value::Schedule(value.into()),
         });
         self
     }
@@ -465,10 +469,10 @@ impl<'a> UpdateEntityBuilder<'a> {
     }
 
     /// Sets a POINT value.
-    pub fn set_point(mut self, property: Id, lat: f64, lon: f64) -> Self {
+    pub fn set_point(mut self, property: Id, lon: f64, lat: f64, alt: Option<f64>) -> Self {
         self.set_properties.push(PropertyValue {
             property,
-            value: Value::Point { lat, lon },
+            value: Value::Point { lon, lat, alt },
         });
         self
     }
@@ -482,11 +486,11 @@ impl<'a> UpdateEntityBuilder<'a> {
         self
     }
 
-    /// Sets a TIMESTAMP value.
-    pub fn set_timestamp(mut self, property: Id, micros: i64) -> Self {
+    /// Sets a SCHEDULE value.
+    pub fn set_schedule(mut self, property: Id, value: impl Into<Cow<'a, str>>) -> Self {
         self.set_properties.push(PropertyValue {
             property,
-            value: Value::Timestamp(micros),
+            value: Value::Schedule(value.into()),
         });
         self
     }
@@ -571,7 +575,7 @@ impl<'a> UpdateEntityBuilder<'a> {
 /// Builder for CreateRelation operations with full control.
 #[derive(Debug, Clone, Default)]
 pub struct RelationBuilder<'a> {
-    id_mode: Option<RelationIdMode>,
+    id: Option<Id>,
     relation_type: Option<Id>,
     from: Option<Id>,
     to: Option<Id>,
@@ -589,15 +593,9 @@ impl<'a> RelationBuilder<'a> {
         Self::default()
     }
 
-    /// Sets unique mode (ID derived from from+to+type).
-    pub fn unique(mut self) -> Self {
-        self.id_mode = Some(RelationIdMode::Unique);
-        self
-    }
-
-    /// Sets many mode with an explicit relation ID.
-    pub fn many(mut self, id: Id) -> Self {
-        self.id_mode = Some(RelationIdMode::Many(id));
+    /// Sets the relation ID.
+    pub fn id(mut self, id: Id) -> Self {
+        self.id = Some(id);
         self
     }
 
@@ -619,7 +617,7 @@ impl<'a> RelationBuilder<'a> {
         self
     }
 
-    /// Sets an explicit reified entity ID (many mode only).
+    /// Sets an explicit reified entity ID.
     pub fn entity(mut self, id: Id) -> Self {
         self.entity = Some(id);
         self
@@ -632,33 +630,33 @@ impl<'a> RelationBuilder<'a> {
     }
 
     /// Sets the from_space pin.
-    pub fn from_space(mut self, id: Id) -> Self {
-        self.from_space = Some(id);
+    pub fn from_space(mut self, space_id: Id) -> Self {
+        self.from_space = Some(space_id);
         self
     }
 
     /// Sets the from_version pin.
-    pub fn from_version(mut self, id: Id) -> Self {
-        self.from_version = Some(id);
+    pub fn from_version(mut self, version_id: Id) -> Self {
+        self.from_version = Some(version_id);
         self
     }
 
     /// Sets the to_space pin.
-    pub fn to_space(mut self, id: Id) -> Self {
-        self.to_space = Some(id);
+    pub fn to_space(mut self, space_id: Id) -> Self {
+        self.to_space = Some(space_id);
         self
     }
 
     /// Sets the to_version pin.
-    pub fn to_version(mut self, id: Id) -> Self {
-        self.to_version = Some(id);
+    pub fn to_version(mut self, version_id: Id) -> Self {
+        self.to_version = Some(version_id);
         self
     }
 
     /// Builds the CreateRelation, returning None if required fields are missing.
     pub fn build(self) -> Option<CreateRelation<'a>> {
         Some(CreateRelation {
-            id_mode: self.id_mode?,
+            id: self.id?,
             relation_type: self.relation_type?,
             from: self.from?,
             to: self.to?,
@@ -669,6 +667,93 @@ impl<'a> RelationBuilder<'a> {
             to_space: self.to_space,
             to_version: self.to_version,
         })
+    }
+}
+
+/// Builder for UpdateRelation operations.
+#[derive(Debug, Clone)]
+pub struct UpdateRelationBuilder<'a> {
+    id: Id,
+    from_space: Option<Id>,
+    from_version: Option<Id>,
+    to_space: Option<Id>,
+    to_version: Option<Id>,
+    position: Option<Cow<'a, str>>,
+    unset: Vec<UnsetRelationField>,
+}
+
+impl<'a> UpdateRelationBuilder<'a> {
+    /// Creates a new UpdateRelationBuilder for the given relation ID.
+    pub fn new(id: Id) -> Self {
+        Self {
+            id,
+            from_space: None,
+            from_version: None,
+            to_space: None,
+            to_version: None,
+            position: None,
+            unset: Vec::new(),
+        }
+    }
+
+    /// Sets the from_space pin.
+    pub fn set_from_space(mut self, space_id: Id) -> Self {
+        self.from_space = Some(space_id);
+        self
+    }
+
+    /// Sets the from_version pin.
+    pub fn set_from_version(mut self, version_id: Id) -> Self {
+        self.from_version = Some(version_id);
+        self
+    }
+
+    /// Sets the to_space pin.
+    pub fn set_to_space(mut self, space_id: Id) -> Self {
+        self.to_space = Some(space_id);
+        self
+    }
+
+    /// Sets the to_version pin.
+    pub fn set_to_version(mut self, version_id: Id) -> Self {
+        self.to_version = Some(version_id);
+        self
+    }
+
+    /// Sets the position for ordering.
+    pub fn set_position(mut self, pos: impl Into<Cow<'a, str>>) -> Self {
+        self.position = Some(pos.into());
+        self
+    }
+
+    /// Unsets the from_space pin.
+    pub fn unset_from_space(mut self) -> Self {
+        self.unset.push(UnsetRelationField::FromSpace);
+        self
+    }
+
+    /// Unsets the from_version pin.
+    pub fn unset_from_version(mut self) -> Self {
+        self.unset.push(UnsetRelationField::FromVersion);
+        self
+    }
+
+    /// Unsets the to_space pin.
+    pub fn unset_to_space(mut self) -> Self {
+        self.unset.push(UnsetRelationField::ToSpace);
+        self
+    }
+
+    /// Unsets the to_version pin.
+    pub fn unset_to_version(mut self) -> Self {
+        self.unset.push(UnsetRelationField::ToVersion);
+        self
+    }
+
+    /// Unsets the position.
+    pub fn unset_position(mut self) -> Self {
+        self.unset.push(UnsetRelationField::Position);
+        self
     }
 }
 
@@ -711,22 +796,22 @@ mod tests {
     #[test]
     fn test_edit_builder_relations() {
         let edit = EditBuilder::new([1u8; 16])
-            .create_relation_unique([2u8; 16], [3u8; 16], [4u8; 16])
-            .create_relation_many([5u8; 16], [2u8; 16], [3u8; 16], [4u8; 16])
+            .create_relation_simple([5u8; 16], [2u8; 16], [3u8; 16], [4u8; 16])
+            .create_relation_simple([6u8; 16], [2u8; 16], [3u8; 16], [4u8; 16])
             .build();
 
         assert_eq!(edit.ops.len(), 2);
 
         match &edit.ops[0] {
             Op::CreateRelation(cr) => {
-                assert!(matches!(cr.id_mode, RelationIdMode::Unique));
+                assert_eq!(cr.id, [5u8; 16]);
             }
             _ => panic!("Expected CreateRelation"),
         }
 
         match &edit.ops[1] {
             Op::CreateRelation(cr) => {
-                assert!(matches!(cr.id_mode, RelationIdMode::Many(_)));
+                assert_eq!(cr.id, [6u8; 16]);
             }
             _ => panic!("Expected CreateRelation"),
         }
@@ -760,7 +845,7 @@ mod tests {
     fn test_relation_builder_full() {
         let edit = EditBuilder::new([0u8; 16])
             .create_relation(|r| {
-                r.many([1u8; 16])
+                r.id([1u8; 16])
                     .from([2u8; 16])
                     .to([3u8; 16])
                     .relation_type([4u8; 16])
@@ -774,7 +859,7 @@ mod tests {
 
         match &edit.ops[0] {
             Op::CreateRelation(cr) => {
-                assert!(matches!(cr.id_mode, RelationIdMode::Many(_)));
+                assert_eq!(cr.id, [1u8; 16]);
                 assert_eq!(cr.entity, Some([5u8; 16]));
                 assert_eq!(cr.position.as_deref(), Some("aaa"));
                 assert_eq!(cr.from_space, Some([6u8; 16]));
@@ -791,9 +876,9 @@ mod tests {
                     .int64([3u8; 16], 123, None)
                     .float64([4u8; 16], 3.14, None)
                     .bool([5u8; 16], true)
-                    .point([6u8; 16], 40.7128, -74.0060)
+                    .point([6u8; 16], -74.0060, 40.7128, None)
                     .date([7u8; 16], "2024-01-15")
-                    .timestamp([8u8; 16], 1704067200_000_000)
+                    .schedule([8u8; 16], "BEGIN:VEVENT\r\nDTSTART:20240315T090000Z\r\nEND:VEVENT")
                     .bytes([9u8; 16], vec![1, 2, 3, 4])
             })
             .build();
