@@ -35,9 +35,9 @@ export type {
   DeleteRelation,
   RestoreRelation,
   CreateProperty,
-  RelationIdMode,
   UnsetLanguage,
   UnsetProperty,
+  UnsetRelationField,
 } from "./op.js";
 export {
   opTypeCode,

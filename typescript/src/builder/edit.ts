@@ -3,7 +3,6 @@ import type { Edit } from "../types/edit.js";
 import type {
   CreateRelation,
   Op,
-  UnsetRelationField,
 } from "../types/op.js";
 import { DataType } from "../types/value.js";
 import { EntityBuilder } from "./entity.js";
