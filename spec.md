@@ -334,7 +334,7 @@ midpoint("a", "b") = "aV"
 3. If positions are equal, tie-break by relation ID bytes (lexicographic unsigned comparison).
 4. Relations without positions are ordered by relation ID bytes.
 
-**Immutability (NORMATIVE):** The structural fields (`entity`, `type`, `from`, `to`) are immutable after creation. To change endpoints, delete and recreate.
+**Mutability (NORMATIVE):** The structural fields (`entity`, `type`, `from`, `to`) are immutable after creation. To change endpoints, delete and recreate. The `position`, `from_space`, `from_version`, `to_space`, and `to_version` fields are mutable via UpdateRelation.
 
 ### 2.7 Per-Space State
 
@@ -427,6 +427,8 @@ UnsetProperty {
 1. `unset_properties`
 2. `set_properties`
 
+> **Serializer rule:** The same (property, language) MUST NOT appear in both `set_properties` and `unset_properties`. Serializers SHOULD squash by keeping only the `set_properties` entry. See Section 3.6.
+
 **DeleteEntity:**
 ```
 DeleteEntity {
@@ -441,6 +443,8 @@ Transitions the entity to DELETED state (tombstoned).
 - Once DELETED, subsequent CreateEntity ops for this entity are ignored (tombstone absorbs upserts).
 - The entity can only be restored via explicit RestoreEntity.
 - Tombstones are deterministic: all indexers replaying the same log converge on the same DELETED state.
+
+> **Serializer rule:** An edit MUST NOT contain DeleteEntity followed by CreateEntity for the same ID. Serializers SHOULD squash to an UpdateEntity or omit the delete. See Section 3.6.
 
 **RestoreEntity:**
 ```
@@ -490,11 +494,22 @@ CreateRelation {
 ```
 UpdateRelation {
   id: ID | index
-  position: string?
+  from_space: ID?          // Set space pin for source
+  from_version: ID?        // Set version pin for source
+  to_space: ID?            // Set space pin for target
+  to_version: ID?          // Set version pin for target
+  position: string?        // Set position
+  unset: Set<Field>?       // Fields to clear: from_space, from_version, to_space, to_version, position
 }
 ```
 
-Updates the relation's position. All other fields (`entity`, `type`, `from`, `to`, space pins, version pins) are immutable after creation.
+Updates the relation's mutable fields. Use `unset` to clear a field (remove a pin or position). The structural fields (`entity`, `type`, `from`, `to`) are immutable after creation—to change endpoints, delete and recreate.
+
+**Application order within op (NORMATIVE):**
+1. `unset`
+2. Set fields (`from_space`, `from_version`, `to_space`, `to_version`, `position`)
+
+> **Serializer rule:** The same field MUST NOT appear in both set and unset. Serializers SHOULD squash by keeping only the set value. See Section 3.6.
 
 **DeleteRelation:**
 ```
@@ -507,8 +522,10 @@ Transitions the relation to DELETED state (tombstoned).
 
 **Tombstone semantics (NORMATIVE):**
 - Once DELETED, subsequent UpdateRelation ops for this relation are ignored.
-- Once DELETED, subsequent CreateRelation ops that would produce the same relation ID are ignored (tombstone absorbs).
+- Once DELETED, subsequent CreateRelation ops with the same relation ID are ignored (tombstone absorbs).
 - The relation can only be restored via explicit RestoreRelation.
+
+> **Serializer rule:** An edit MUST NOT contain DeleteRelation followed by CreateRelation for the same ID. Serializers SHOULD squash by omitting the delete. See Section 3.6.
 
 **RestoreRelation:**
 ```
@@ -556,6 +573,20 @@ Operations are validated **structurally** at write time and **semantically** at 
 2. Apply merge rules (Section 4.2.1)
 3. Tombstone dominance: updates after delete are ignored
 4. Return resolved state or DELETED status
+
+### 3.6 Serializer Requirements
+
+Indexers are lenient and will process edits even if they contain redundant or contradictory operations. However, spec-compliant clients SHOULD NOT produce such edits. Serializers SHOULD automatically rewrite operations to ensure clean output.
+
+**Redundant property operations:** An UpdateEntity op MUST NOT include the same (property, language) in both `set_properties` and `unset_properties`. Serializers SHOULD squash by keeping only the `set_properties` entry (since unset is applied first, the set would overwrite anyway).
+
+**Redundant relation field operations:** An UpdateRelation op MUST NOT include the same field in both set and `unset`. Serializers SHOULD squash by keeping only the set value.
+
+**Delete-then-create in same edit:** An edit MUST NOT contain a DeleteEntity followed by a CreateEntity for the same entity ID. Serializers SHOULD squash to a single UpdateEntity that clears and replaces values, or omit the delete if the intent is to overwrite.
+
+**Delete-then-create relations:** An edit MUST NOT contain a DeleteRelation followed by a CreateRelation for the same relation ID. Serializers SHOULD squash by omitting the delete if the relation is being recreated, or by keeping only the delete if appropriate.
+
+**Rationale:** These constraints simplify reasoning about edit semantics and prevent accidental patterns that may indicate client bugs. Indexers remain lenient to handle legacy or non-compliant clients gracefully.
 
 ---
 
@@ -722,9 +753,9 @@ Relation {
 }
 ```
 
-**Space pins:** The `from_space` and `to_space` fields pin relation endpoints to a specific space. This enables precise cross-space references where the relation refers to the entity as it exists in that specific space, rather than relying on resolution heuristics. Space pins are immutable after creation.
+**Space pins:** The `from_space` and `to_space` fields pin relation endpoints to a specific space. This enables precise cross-space references where the relation refers to the entity as it exists in that specific space, rather than relying on resolution heuristics. Space pins can be updated via UpdateRelation.
 
-**Version pins:** The `from_version` and `to_version` fields pin relation endpoints to a specific version (edit ID). This enables immutable citations where the relation always refers to the entity as it existed at that specific edit, rather than the current resolved state. Version pins are immutable after creation.
+**Version pins:** The `from_version` and `to_version` fields pin relation endpoints to a specific version (edit ID). This enables immutable citations where the relation always refers to the entity as it existed at that specific edit, rather than the current resolved state. Version pins can be updated via UpdateRelation.
 
 ---
 
@@ -896,9 +927,24 @@ flags: uint8
 **UpdateRelation:**
 ```
 id: ObjectRef
-flags: uint8
-  bit 0 = has_position
-  bits 1-7 = reserved (must be 0)
+set_flags: uint8
+  bit 0 = has_from_space
+  bit 1 = has_from_version
+  bit 2 = has_to_space
+  bit 3 = has_to_version
+  bit 4 = has_position
+  bits 5-7 = reserved (must be 0)
+unset_flags: uint8
+  bit 0 = unset_from_space
+  bit 1 = unset_from_version
+  bit 2 = unset_to_space
+  bit 3 = unset_to_version
+  bit 4 = unset_position
+  bits 5-7 = reserved (must be 0)
+[if has_from_space]: from_space: ID
+[if has_from_version]: from_version: ID
+[if has_to_space]: to_space: ID
+[if has_to_version]: to_version: ID
 [if has_position]: position: String
 ```
 
