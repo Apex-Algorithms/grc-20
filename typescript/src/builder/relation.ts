@@ -8,7 +8,9 @@ export class RelationBuilder {
   private _id?: Id;
   private relationType?: Id;
   private from?: Id;
+  private fromIsValueRef?: boolean;
   private to?: Id;
+  private toIsValueRef?: boolean;
   private entity?: Id;
   private position?: string;
   private fromSpace?: Id;
@@ -45,6 +47,25 @@ export class RelationBuilder {
    */
   toEntity(id: Id): this {
     this.to = id;
+    this.toIsValueRef = false;
+    return this;
+  }
+
+  /**
+   * Sets the source as a value ref ID (inline encoding).
+   */
+  fromValueRef(id: Id): this {
+    this.from = id;
+    this.fromIsValueRef = true;
+    return this;
+  }
+
+  /**
+   * Sets the target as a value ref ID (inline encoding).
+   */
+  toValueRef(id: Id): this {
+    this.to = id;
+    this.toIsValueRef = true;
     return this;
   }
 
@@ -109,7 +130,9 @@ export class RelationBuilder {
       id: this._id,
       relationType: this.relationType,
       from: this.from,
+      fromIsValueRef: this.fromIsValueRef || undefined,
       to: this.to,
+      toIsValueRef: this.toIsValueRef || undefined,
       entity: this.entity,
       position: this.position,
       fromSpace: this.fromSpace,

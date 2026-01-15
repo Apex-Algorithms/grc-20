@@ -34,6 +34,7 @@ export type {
   UpdateRelation,
   DeleteRelation,
   RestoreRelation,
+  CreateValueRef,
   UnsetLanguage,
   UnsetValue,
   UnsetRelationField,
@@ -49,6 +50,7 @@ export {
   OP_TYPE_UPDATE_RELATION,
   OP_TYPE_DELETE_RELATION,
   OP_TYPE_RESTORE_RELATION,
+  OP_TYPE_CREATE_VALUE_REF,
 } from "./op.js";
 
 // Edit types

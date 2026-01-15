@@ -2,6 +2,7 @@ import type { Id } from "../types/id.js";
 import type {
   CreateEntity,
   CreateRelation,
+  CreateValueRef,
   DeleteEntity,
   DeleteRelation,
   Op,
@@ -16,6 +17,7 @@ import type {
 import {
   OP_TYPE_CREATE_ENTITY,
   OP_TYPE_CREATE_RELATION,
+  OP_TYPE_CREATE_VALUE_REF,
   OP_TYPE_DELETE_ENTITY,
   OP_TYPE_DELETE_RELATION,
   OP_TYPE_RESTORE_ENTITY,
@@ -59,6 +61,12 @@ const RELATION_HAS_TO_SPACE = 0x04;
 const RELATION_HAS_TO_VERSION = 0x08;
 const RELATION_HAS_ENTITY = 0x10;
 const RELATION_HAS_POSITION = 0x20;
+const RELATION_FROM_IS_VALUE_REF = 0x40;
+const RELATION_TO_IS_VALUE_REF = 0x80;
+
+// CreateValueRef flags
+const VALUE_REF_HAS_LANGUAGE = 0x01;
+const VALUE_REF_HAS_SPACE = 0x02;
 
 // UpdateRelation set flags
 const UPDATE_REL_SET_FROM_SPACE = 0x01;
@@ -102,6 +110,9 @@ export function encodeOp(writer: Writer, op: Op, dicts: OpDictionaryIndices): vo
       break;
     case "restoreRelation":
       encodeRestoreRelation(writer, op, dicts);
+      break;
+    case "createValueRef":
+      encodeCreateValueRef(writer, op, dicts);
       break;
   }
 }
@@ -174,10 +185,8 @@ function encodeCreateRelation(writer: Writer, op: CreateRelation, dicts: OpDicti
   // Relation ID (always explicit)
   writer.writeId(op.id);
 
-  // Type, from, to
+  // Type
   writer.writeVarintNumber(dicts.getRelationTypeIndex(op.relationType));
-  writer.writeVarintNumber(dicts.getObjectIndex(op.from));
-  writer.writeVarintNumber(dicts.getObjectIndex(op.to));
 
   // Flags
   let flags = 0;
@@ -187,7 +196,23 @@ function encodeCreateRelation(writer: Writer, op: CreateRelation, dicts: OpDicti
   if (op.toVersion) flags |= RELATION_HAS_TO_VERSION;
   if (op.entity) flags |= RELATION_HAS_ENTITY;
   if (op.position) flags |= RELATION_HAS_POSITION;
+  if (op.fromIsValueRef) flags |= RELATION_FROM_IS_VALUE_REF;
+  if (op.toIsValueRef) flags |= RELATION_TO_IS_VALUE_REF;
   writer.writeByte(flags);
+
+  // From endpoint: inline ID if value ref, otherwise ObjectRef
+  if (op.fromIsValueRef) {
+    writer.writeId(op.from);
+  } else {
+    writer.writeVarintNumber(dicts.getObjectIndex(op.from));
+  }
+
+  // To endpoint: inline ID if value ref, otherwise ObjectRef
+  if (op.toIsValueRef) {
+    writer.writeId(op.to);
+  } else {
+    writer.writeVarintNumber(dicts.getObjectIndex(op.to));
+  }
 
   // Optional fields
   if (op.fromSpace) writer.writeId(op.fromSpace);
@@ -252,6 +277,25 @@ function encodeRestoreRelation(writer: Writer, op: RestoreRelation, dicts: OpDic
   writer.writeVarintNumber(dicts.getObjectIndex(op.id));
 }
 
+function encodeCreateValueRef(writer: Writer, op: CreateValueRef, dicts: OpDictionaryIndices): void {
+  writer.writeByte(OP_TYPE_CREATE_VALUE_REF);
+  writer.writeId(op.id);
+  writer.writeVarintNumber(dicts.getObjectIndex(op.entity));
+  writer.writeVarintNumber(dicts.getPropertyIndex(op.property));
+
+  let flags = 0;
+  if (op.language !== undefined) flags |= VALUE_REF_HAS_LANGUAGE;
+  if (op.space !== undefined) flags |= VALUE_REF_HAS_SPACE;
+  writer.writeByte(flags);
+
+  if (op.language !== undefined) {
+    writer.writeVarintNumber(dicts.getLanguageIndex(op.language));
+  }
+  if (op.space !== undefined) {
+    writer.writeId(op.space);
+  }
+}
+
 /**
  * Decodes a single operation.
  */
@@ -275,6 +319,8 @@ export function decodeOp(reader: Reader, dicts: OpDictionaryLookups): Op {
       return decodeDeleteRelation(reader, dicts);
     case OP_TYPE_RESTORE_RELATION:
       return decodeRestoreRelation(reader, dicts);
+    case OP_TYPE_CREATE_VALUE_REF:
+      return decodeCreateValueRef(reader, dicts);
     default:
       throw new DecodeError("E005", `invalid op type: ${opType}`);
   }
@@ -355,14 +401,16 @@ function decodeCreateRelation(reader: Reader, dicts: OpDictionaryLookups): Creat
   const id = reader.readId();
 
   const relationType = dicts.getRelationType(reader.readVarintNumber());
-  const from = dicts.getObject(reader.readVarintNumber());
-  const to = dicts.getObject(reader.readVarintNumber());
   const flags = reader.readByte();
 
-  // Check reserved bits
-  if ((flags & 0xc0) !== 0) {
-    throw new DecodeError("E005", "reserved bits are non-zero in CreateRelation flags");
-  }
+  const fromIsValueRef = (flags & RELATION_FROM_IS_VALUE_REF) !== 0;
+  const toIsValueRef = (flags & RELATION_TO_IS_VALUE_REF) !== 0;
+
+  // Read from endpoint: inline ID if value ref, otherwise ObjectRef
+  const from = fromIsValueRef ? reader.readId() : dicts.getObject(reader.readVarintNumber());
+
+  // Read to endpoint: inline ID if value ref, otherwise ObjectRef
+  const to = toIsValueRef ? reader.readId() : dicts.getObject(reader.readVarintNumber());
 
   const fromSpace = flags & RELATION_HAS_FROM_SPACE ? reader.readId() : undefined;
   const fromVersion = flags & RELATION_HAS_FROM_VERSION ? reader.readId() : undefined;
@@ -376,7 +424,9 @@ function decodeCreateRelation(reader: Reader, dicts: OpDictionaryLookups): Creat
     id,
     relationType,
     from,
+    fromIsValueRef: fromIsValueRef || undefined,
     to,
+    toIsValueRef: toIsValueRef || undefined,
     fromSpace,
     fromVersion,
     toSpace,
@@ -438,4 +488,30 @@ function decodeDeleteRelation(reader: Reader, dicts: OpDictionaryLookups): Delet
 function decodeRestoreRelation(reader: Reader, dicts: OpDictionaryLookups): RestoreRelation {
   const id = dicts.getObject(reader.readVarintNumber());
   return { type: "restoreRelation", id };
+}
+
+function decodeCreateValueRef(reader: Reader, dicts: OpDictionaryLookups): CreateValueRef {
+  const id = reader.readId();
+  const entity = dicts.getObject(reader.readVarintNumber());
+  const prop = dicts.getProperty(reader.readVarintNumber());
+  const property = prop.id;
+
+  const flags = reader.readByte();
+
+  // Check reserved bits
+  if ((flags & 0xfc) !== 0) {
+    throw new DecodeError("E005", "reserved bits are non-zero in CreateValueRef flags");
+  }
+
+  const language = flags & VALUE_REF_HAS_LANGUAGE ? dicts.getLanguage(reader.readVarintNumber()) : undefined;
+  const space = flags & VALUE_REF_HAS_SPACE ? reader.readId() : undefined;
+
+  return {
+    type: "createValueRef",
+    id,
+    entity,
+    property,
+    language,
+    space,
+  };
 }

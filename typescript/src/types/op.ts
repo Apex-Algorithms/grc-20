@@ -79,7 +79,11 @@ export interface CreateRelation {
   id: Id;
   relationType: Id;
   from: Id;
+  /** If true, `from` is a value ref ID (inline encoding). */
+  fromIsValueRef?: boolean;
   to: Id;
+  /** If true, `to` is a value ref ID (inline encoding). */
+  toIsValueRef?: boolean;
   fromSpace?: Id;
   fromVersion?: Id;
   toSpace?: Id;
@@ -126,6 +130,25 @@ export interface RestoreRelation {
 }
 
 /**
+ * Creates a referenceable ID for a value slot (spec Section 3.4).
+ *
+ * This enables relations to target specific values for provenance,
+ * confidence, attribution, or other qualifiers.
+ */
+export interface CreateValueRef {
+  type: "createValueRef";
+  id: Id;
+  /** The entity holding the value. */
+  entity: Id;
+  /** The property of the value. */
+  property: Id;
+  /** The language (TEXT values only). */
+  language?: Id;
+  /** The space containing the value (default: current space). */
+  space?: Id;
+}
+
+/**
  * An atomic operation that modifies graph state (spec Section 3.1).
  */
 export type Op =
@@ -136,7 +159,8 @@ export type Op =
   | CreateRelation
   | UpdateRelation
   | DeleteRelation
-  | RestoreRelation;
+  | RestoreRelation
+  | CreateValueRef;
 
 /**
  * Op type codes for wire encoding.
@@ -149,6 +173,7 @@ export const OP_TYPE_CREATE_RELATION = 5;
 export const OP_TYPE_UPDATE_RELATION = 6;
 export const OP_TYPE_DELETE_RELATION = 7;
 export const OP_TYPE_RESTORE_RELATION = 8;
+export const OP_TYPE_CREATE_VALUE_REF = 9;
 
 /**
  * Returns the op type code for wire encoding.
@@ -171,6 +196,8 @@ export function opTypeCode(op: Op): number {
       return OP_TYPE_DELETE_RELATION;
     case "restoreRelation":
       return OP_TYPE_RESTORE_RELATION;
+    case "createValueRef":
+      return OP_TYPE_CREATE_VALUE_REF;
   }
 }
 

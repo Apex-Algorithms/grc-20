@@ -71,13 +71,23 @@ export function encodeValuePayload(writer: Writer, value: Value): void {
       writer.writeString(value.value);
       break;
 
-    case "datetime":
+    case "datetime": {
       // DATETIME must contain 'T'
       if (!value.value.includes("T")) {
         throw new Error("DATETIME must contain 'T' separator");
       }
+      // DATETIME must include timezone (Z or offset)
+      const tPos = value.value.indexOf("T");
+      const hasTimezone =
+        value.value.includes("Z") ||
+        value.value.includes("+") ||
+        value.value.slice(tPos).includes("-");
+      if (!hasTimezone) {
+        throw new Error("DATETIME must include timezone (Z or offset)");
+      }
       writer.writeString(value.value);
       break;
+    }
 
     case "schedule":
       writer.writeString(value.value);
@@ -237,6 +247,15 @@ export function decodeValuePayload(reader: Reader, dataType: DataType): Value {
       // Basic validation: DATETIME should contain 'T'
       if (!value.includes("T")) {
         throw new DecodeError("E005", "DATETIME must contain 'T' separator");
+      }
+      // DATETIME must include timezone (Z or offset)
+      const tPos = value.indexOf("T");
+      const hasTimezone =
+        value.includes("Z") ||
+        value.includes("+") ||
+        value.slice(tPos).includes("-");
+      if (!hasTimezone) {
+        throw new DecodeError("E005", "DATETIME must include timezone (Z or offset)");
       }
       return { type: "datetime", value };
     }
