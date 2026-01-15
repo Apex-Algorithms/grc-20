@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use crate::model::{DataType, Id, PropertyValue};
+use crate::model::{Id, PropertyValue};
 
 /// An atomic operation that modifies graph state (spec Section 3.1).
 #[derive(Debug, Clone, PartialEq)]
@@ -17,7 +17,6 @@ pub enum Op<'a> {
     UpdateRelation(UpdateRelation<'a>),
     DeleteRelation(DeleteRelation),
     RestoreRelation(RestoreRelation),
-    CreateProperty(CreateProperty),
 }
 
 impl Op<'_> {
@@ -32,7 +31,6 @@ impl Op<'_> {
             Op::UpdateRelation(_) => 6,
             Op::DeleteRelation(_) => 7,
             Op::RestoreRelation(_) => 8,
-            Op::CreateProperty(_) => 9,
         }
     }
 }
@@ -52,7 +50,7 @@ pub struct CreateEntity<'a> {
 /// Updates an existing entity (spec Section 3.2).
 ///
 /// Application order within op:
-/// 1. unset_properties
+/// 1. unset_values
 /// 2. set_properties
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct UpdateEntity<'a> {
@@ -61,10 +59,10 @@ pub struct UpdateEntity<'a> {
     /// Replace value for these properties (LWW).
     pub set_properties: Vec<PropertyValue<'a>>,
     /// Clear values for these properties (optionally specific language for TEXT).
-    pub unset_properties: Vec<UnsetProperty>,
+    pub unset_values: Vec<UnsetValue>,
 }
 
-/// Specifies which language slot to clear for an UnsetProperty.
+/// Specifies which language slot to clear for an UnsetValue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsetLanguage {
     /// Clear all language slots (wire format: 0xFFFFFFFF).
@@ -81,10 +79,10 @@ impl Default for UnsetLanguage {
     }
 }
 
-/// Specifies a property to unset, with optional language targeting (TEXT only).
+/// Specifies a value to unset, with optional language targeting (TEXT only).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct UnsetProperty {
-    /// The property to clear.
+pub struct UnsetValue {
+    /// The property whose value to clear.
     pub property: Id,
     /// Which language slot(s) to clear.
     /// For TEXT properties: All clears all slots, NonLinguistic clears non-linguistic slot,
@@ -93,18 +91,18 @@ pub struct UnsetProperty {
     pub language: UnsetLanguage,
 }
 
-impl UnsetProperty {
-    /// Creates an UnsetProperty that clears all values for a property.
+impl UnsetValue {
+    /// Creates an UnsetValue that clears all values for a property.
     pub fn all(property: Id) -> Self {
         Self { property, language: UnsetLanguage::All }
     }
 
-    /// Creates an UnsetProperty that clears the non-linguistic slot for a TEXT property.
+    /// Creates an UnsetValue that clears the non-linguistic slot for a TEXT property.
     pub fn non_linguistic(property: Id) -> Self {
         Self { property, language: UnsetLanguage::NonLinguistic }
     }
 
-    /// Creates an UnsetProperty that clears a specific language for a TEXT property.
+    /// Creates an UnsetValue that clears a specific language for a TEXT property.
     pub fn language(property: Id, language: Id) -> Self {
         Self { property, language: UnsetLanguage::Specific(language) }
     }
@@ -116,13 +114,13 @@ impl<'a> UpdateEntity<'a> {
         Self {
             id,
             set_properties: Vec::new(),
-            unset_properties: Vec::new(),
+            unset_values: Vec::new(),
         }
     }
 
     /// Returns true if this update has no actual changes.
     pub fn is_empty(&self) -> bool {
-        self.set_properties.is_empty() && self.unset_properties.is_empty()
+        self.set_properties.is_empty() && self.unset_values.is_empty()
     }
 }
 
@@ -269,17 +267,6 @@ pub struct DeleteRelation {
 pub struct RestoreRelation {
     /// The relation to restore.
     pub id: Id,
-}
-
-/// Creates a new property in the schema (spec Section 3.4).
-///
-/// Properties are immutable once created (first-writer-wins).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateProperty {
-    /// The property's unique identifier.
-    pub id: Id,
-    /// The data type for values of this property.
-    pub data_type: DataType,
 }
 
 /// Validates a position string according to spec rules.

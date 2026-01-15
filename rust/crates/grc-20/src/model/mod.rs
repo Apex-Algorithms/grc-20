@@ -17,8 +17,8 @@ pub use builder::{EditBuilder, EntityBuilder, RelationBuilder, UpdateEntityBuild
 pub use edit::{DictionaryBuilder, Edit, WireDictionaries};
 pub use id::{derived_uuid, format_id, parse_id, relation_entity_id, text_value_id, value_id, Id, NIL_ID};
 pub use op::{
-    validate_position, CreateEntity, CreateProperty, CreateRelation, DeleteEntity, DeleteRelation,
-    Op, RestoreEntity, RestoreRelation, UnsetLanguage, UnsetProperty, UnsetRelationField, UpdateEntity,
+    validate_position, CreateEntity, CreateRelation, DeleteEntity, DeleteRelation,
+    Op, RestoreEntity, RestoreRelation, UnsetLanguage, UnsetRelationField, UnsetValue, UpdateEntity,
     UpdateRelation,
 };
 pub use value::{DataType, DecimalMantissa, EmbeddingSubType, Property, PropertyValue, Value};

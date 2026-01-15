@@ -265,7 +265,7 @@ fn op_to_owned(op: Op<'_>) -> Op<'static> {
         Op::UpdateEntity(ue) => Op::UpdateEntity(crate::model::UpdateEntity {
             id: ue.id,
             set_properties: ue.set_properties.into_iter().map(pv_to_owned).collect(),
-            unset_properties: ue.unset_properties,
+            unset_values: ue.unset_values,
         }),
         Op::DeleteEntity(de) => Op::DeleteEntity(de),
         Op::RestoreEntity(re) => Op::RestoreEntity(re),
@@ -292,7 +292,6 @@ fn op_to_owned(op: Op<'_>) -> Op<'static> {
         }),
         Op::DeleteRelation(dr) => Op::DeleteRelation(dr),
         Op::RestoreRelation(rr) => Op::RestoreRelation(rr),
-        Op::CreateProperty(cp) => Op::CreateProperty(cp),
     }
 }
 
@@ -453,13 +452,8 @@ pub fn encode_edit_with_options(edit: &Edit, options: EncodeOptions) -> Result<V
 
 /// Fast single-pass encoding (non-canonical).
 fn encode_edit_fast(edit: &Edit) -> Result<Vec<u8>, EncodeError> {
-    // Build property type map from CreateProperty ops
-    let mut property_types: FxHashMap<Id, DataType> = FxHashMap::default();
-    for op in &edit.ops {
-        if let Op::CreateProperty(cp) = op {
-            property_types.insert(cp.id, cp.data_type);
-        }
-    }
+    // Property types are determined from values themselves (per-edit typing)
+    let property_types = rustc_hash::FxHashMap::default();
 
     // Single pass: encode ops while building dictionaries
     let mut dict_builder = DictionaryBuilder::with_capacity(edit.ops.len());
@@ -502,15 +496,10 @@ fn encode_edit_fast(edit: &Edit) -> Result<Vec<u8>, EncodeError> {
 /// - Dictionaries sorted by ID bytes
 /// - Authors sorted by ID bytes, no duplicates
 /// - Values sorted by (propertyRef, languageRef), no duplicate (property, language)
-/// - Unset properties sorted by (propertyRef, language), no duplicates
+/// - Unset values sorted by (propertyRef, language), no duplicates
 fn encode_edit_canonical(edit: &Edit) -> Result<Vec<u8>, EncodeError> {
-    // Build property type map from CreateProperty ops
-    let mut property_types: FxHashMap<Id, DataType> = FxHashMap::default();
-    for op in &edit.ops {
-        if let Op::CreateProperty(cp) = op {
-            property_types.insert(cp.id, cp.data_type);
-        }
-    }
+    // Property types are determined from values themselves (per-edit typing)
+    let property_types = rustc_hash::FxHashMap::default();
 
     // Pass 1: Collect all dictionary entries by doing a dry run
     let mut dict_builder = DictionaryBuilder::with_capacity(edit.ops.len());
@@ -588,9 +577,9 @@ fn encode_op_canonical(
             Ok(())
         }
         Op::UpdateEntity(ue) => {
-            // Sort set_properties and unset_properties, check for duplicates
+            // Sort set_properties and unset_values, check for duplicates
             let sorted_set = sort_and_check_values(&ue.set_properties, dict_builder)?;
-            let sorted_unset = sort_and_check_unsets(&ue.unset_properties, dict_builder)?;
+            let sorted_unset = sort_and_check_unsets(&ue.unset_values, dict_builder)?;
 
             writer.write_byte(2); // OP_UPDATE_ENTITY
             let id_index = dict_builder.add_object(ue.id);
@@ -601,7 +590,7 @@ fn encode_op_canonical(
                 flags |= 0x01; // FLAG_HAS_SET_PROPERTIES
             }
             if !sorted_unset.is_empty() {
-                flags |= 0x02; // FLAG_HAS_UNSET_PROPERTIES
+                flags |= 0x02; // FLAG_HAS_UNSET_VALUES
             }
             writer.write_byte(flags);
 
@@ -685,11 +674,11 @@ fn sort_and_check_values<'a>(
     Ok(indexed.into_iter().map(|(_, _, _, pv)| pv.clone()).collect())
 }
 
-/// Sorts unset properties by (property_index, language) and checks for duplicates.
+/// Sorts unset values by (property_index, language) and checks for duplicates.
 fn sort_and_check_unsets(
-    unsets: &[crate::model::UnsetProperty],
+    unsets: &[crate::model::UnsetValue],
     dict_builder: &DictionaryBuilder,
-) -> Result<Vec<crate::model::UnsetProperty>, EncodeError> {
+) -> Result<Vec<crate::model::UnsetValue>, EncodeError> {
     use crate::model::UnsetLanguage;
 
     if unsets.is_empty() {
@@ -697,7 +686,7 @@ fn sort_and_check_unsets(
     }
 
     // Create (property_index, language_sort_key, original_index) tuples for sorting
-    let mut indexed: Vec<(usize, u32, usize, &crate::model::UnsetProperty)> = unsets
+    let mut indexed: Vec<(usize, u32, usize, &crate::model::UnsetValue)> = unsets
         .iter()
         .enumerate()
         .map(|(i, up)| {
@@ -758,13 +747,8 @@ pub fn encode_edit_profiled(edit: &Edit, profile: bool) -> Result<Vec<u8>, Encod
 
     let t0 = Instant::now();
 
-    // Build property type map
-    let mut property_types: FxHashMap<Id, DataType> = FxHashMap::default();
-    for op in &edit.ops {
-        if let Op::CreateProperty(cp) = op {
-            property_types.insert(cp.id, cp.data_type);
-        }
-    }
+    // Property types are determined from values themselves (per-edit typing)
+    let property_types = rustc_hash::FxHashMap::default();
     let t1 = Instant::now();
 
     // Single pass: encode ops while building dictionaries
@@ -795,7 +779,7 @@ pub fn encode_edit_profiled(edit: &Edit, profile: bool) -> Result<Vec<u8>, Encod
 
     let total = t3.duration_since(t0);
     eprintln!("=== Encode Profile (single-pass) ===");
-    eprintln!("  build property_types: {:?} ({:.1}%)", t1.duration_since(t0), 100.0 * t1.duration_since(t0).as_secs_f64() / total.as_secs_f64());
+    eprintln!("  setup: {:?} ({:.1}%)", t1.duration_since(t0), 100.0 * t1.duration_since(t0).as_secs_f64() / total.as_secs_f64());
     eprintln!("  encode_ops + build_dicts: {:?} ({:.1}%)", t2.duration_since(t1), 100.0 * t2.duration_since(t1).as_secs_f64() / total.as_secs_f64());
     eprintln!("  assemble output: {:?} ({:.1}%)", t3.duration_since(t2), 100.0 * t3.duration_since(t2).as_secs_f64() / total.as_secs_f64());
     eprintln!("  TOTAL: {:?}", total);
@@ -830,7 +814,7 @@ pub fn encode_edit_compressed_with_options(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CreateEntity, CreateProperty, PropertyValue, Value};
+    use crate::model::{CreateEntity, PropertyValue, Value};
 
     fn make_test_edit() -> Edit<'static> {
         Edit {
@@ -839,10 +823,6 @@ mod tests {
             authors: vec![[2u8; 16]],
             created_at: 1234567890,
             ops: vec![
-                Op::CreateProperty(CreateProperty {
-                    id: [10u8; 16],
-                    data_type: DataType::Text,
-                }),
                 Op::CreateEntity(CreateEntity {
                     id: [3u8; 16],
                     values: vec![PropertyValue {
@@ -936,27 +916,19 @@ mod tests {
 
     #[test]
     fn test_canonical_encoding_deterministic() {
-        // Two edits with properties in different order should produce
+        // Two edits with values in different order should produce
         // identical bytes when using canonical encoding
 
         let prop_a = [0x0A; 16]; // Comes first lexicographically
         let prop_b = [0x0B; 16]; // Comes second
 
-        // Edit 1: properties added in order A, B
+        // Edit 1: values in order A, B
         let edit1: Edit<'static> = Edit {
             id: [1u8; 16],
             name: Cow::Owned("Test".to_string()),
             authors: vec![],
             created_at: 0,
             ops: vec![
-                Op::CreateProperty(CreateProperty {
-                    id: prop_a,
-                    data_type: DataType::Text,
-                }),
-                Op::CreateProperty(CreateProperty {
-                    id: prop_b,
-                    data_type: DataType::Int64,
-                }),
                 Op::CreateEntity(CreateEntity {
                     id: [3u8; 16],
                     values: vec![
@@ -976,21 +948,13 @@ mod tests {
             ],
         };
 
-        // Edit 2: Same content but properties used in different order in entity
+        // Edit 2: Same content but values in different order
         let edit2: Edit<'static> = Edit {
             id: [1u8; 16],
             name: Cow::Owned("Test".to_string()),
             authors: vec![],
             created_at: 0,
             ops: vec![
-                Op::CreateProperty(CreateProperty {
-                    id: prop_a,
-                    data_type: DataType::Text,
-                }),
-                Op::CreateProperty(CreateProperty {
-                    id: prop_b,
-                    data_type: DataType::Int64,
-                }),
                 Op::CreateEntity(CreateEntity {
                     id: [3u8; 16],
                     values: vec![
@@ -1097,10 +1061,6 @@ mod tests {
             authors: vec![],
             created_at: 0,
             ops: vec![
-                Op::CreateProperty(CreateProperty {
-                    id: prop,
-                    data_type: DataType::Text,
-                }),
                 Op::CreateEntity(CreateEntity {
                     id: [1u8; 16],
                     values: vec![
@@ -1140,10 +1100,6 @@ mod tests {
             authors: vec![],
             created_at: 0,
             ops: vec![
-                Op::CreateProperty(CreateProperty {
-                    id: prop,
-                    data_type: DataType::Text,
-                }),
                 Op::CreateEntity(CreateEntity {
                     id: [1u8; 16],
                     values: vec![
@@ -1183,14 +1139,6 @@ mod tests {
             authors: vec![],
             created_at: 0,
             ops: vec![
-                Op::CreateProperty(CreateProperty {
-                    id: prop_a,
-                    data_type: DataType::Text,
-                }),
-                Op::CreateProperty(CreateProperty {
-                    id: prop_b,
-                    data_type: DataType::Int64,
-                }),
                 Op::CreateEntity(CreateEntity {
                     id: [3u8; 16],
                     values: vec![
@@ -1217,6 +1165,6 @@ mod tests {
 
         // Should roundtrip
         let decoded = decode_edit(&encoded1).unwrap();
-        assert_eq!(decoded.ops.len(), 3);
+        assert_eq!(decoded.ops.len(), 1);
     }
 }

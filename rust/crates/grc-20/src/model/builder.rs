@@ -23,9 +23,9 @@
 use std::borrow::Cow;
 
 use crate::model::{
-    CreateEntity, CreateProperty, CreateRelation, DataType, DeleteEntity, DeleteRelation,
+    CreateEntity, CreateRelation, DeleteEntity, DeleteRelation,
     Edit, Id, Op, PropertyValue, RestoreEntity, RestoreRelation, UnsetRelationField,
-    UnsetLanguage, UnsetProperty, UpdateEntity, UpdateRelation, Value,
+    UnsetLanguage, UnsetValue, UpdateEntity, UpdateRelation, Value,
 };
 
 /// Builder for constructing an Edit with operations.
@@ -86,16 +86,6 @@ impl<'a> EditBuilder<'a> {
     }
 
     // =========================================================================
-    // Property Operations
-    // =========================================================================
-
-    /// Adds a CreateProperty operation.
-    pub fn create_property(mut self, id: Id, data_type: DataType) -> Self {
-        self.ops.push(Op::CreateProperty(CreateProperty { id, data_type }));
-        self
-    }
-
-    // =========================================================================
     // Entity Operations
     // =========================================================================
 
@@ -130,7 +120,7 @@ impl<'a> EditBuilder<'a> {
         self.ops.push(Op::UpdateEntity(UpdateEntity {
             id: builder.id,
             set_properties: builder.set_properties,
-            unset_properties: builder.unset_properties,
+            unset_values: builder.unset_values,
         }));
         self
     }
@@ -423,7 +413,7 @@ impl<'a> EntityBuilder<'a> {
 pub struct UpdateEntityBuilder<'a> {
     id: Id,
     set_properties: Vec<PropertyValue<'a>>,
-    unset_properties: Vec<UnsetProperty>,
+    unset_values: Vec<UnsetValue>,
 }
 
 impl<'a> UpdateEntityBuilder<'a> {
@@ -432,7 +422,7 @@ impl<'a> UpdateEntityBuilder<'a> {
         Self {
             id,
             set_properties: Vec::new(),
-            unset_properties: Vec::new(),
+            unset_values: Vec::new(),
         }
     }
 
@@ -576,13 +566,13 @@ impl<'a> UpdateEntityBuilder<'a> {
 
     /// Unsets a specific property+language combination.
     pub fn unset(mut self, property: Id, language: UnsetLanguage) -> Self {
-        self.unset_properties.push(UnsetProperty { property, language });
+        self.unset_values.push(UnsetValue { property, language });
         self
     }
 
     /// Unsets all values for a property (all languages).
     pub fn unset_all(mut self, property: Id) -> Self {
-        self.unset_properties.push(UnsetProperty {
+        self.unset_values.push(UnsetValue {
             property,
             language: UnsetLanguage::All,
         });
@@ -591,7 +581,7 @@ impl<'a> UpdateEntityBuilder<'a> {
 
     /// Unsets the non-linguistic value for a property.
     pub fn unset_non_linguistic(mut self, property: Id) -> Self {
-        self.unset_properties.push(UnsetProperty {
+        self.unset_values.push(UnsetValue {
             property,
             language: UnsetLanguage::NonLinguistic,
         });
@@ -600,7 +590,7 @@ impl<'a> UpdateEntityBuilder<'a> {
 
     /// Unsets a specific language for a property.
     pub fn unset_language(mut self, property: Id, language: Id) -> Self {
-        self.unset_properties.push(UnsetProperty {
+        self.unset_values.push(UnsetValue {
             property,
             language: UnsetLanguage::Specific(language),
         });
@@ -871,7 +861,7 @@ mod tests {
             Op::UpdateEntity(ue) => {
                 assert_eq!(ue.id, entity_id);
                 assert_eq!(ue.set_properties.len(), 1);
-                assert_eq!(ue.unset_properties.len(), 1);
+                assert_eq!(ue.unset_values.len(), 1);
             }
             _ => panic!("Expected UpdateEntity"),
         }

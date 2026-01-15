@@ -7,9 +7,9 @@ use crate::codec::value::{decode_position, decode_property_value, validate_posit
 use crate::error::{DecodeError, EncodeError};
 use crate::limits::MAX_VALUES_PER_ENTITY;
 use crate::model::{
-    CreateEntity, CreateProperty, CreateRelation, DataType, DeleteEntity, DeleteRelation,
+    CreateEntity, CreateRelation, DataType, DeleteEntity, DeleteRelation,
     DictionaryBuilder, Op, PropertyValue, RestoreEntity, RestoreRelation,
-    UnsetLanguage, UnsetProperty, UnsetRelationField, UpdateEntity, UpdateRelation, WireDictionaries,
+    UnsetLanguage, UnsetValue, UnsetRelationField, UpdateEntity, UpdateRelation, WireDictionaries,
 };
 
 // Op type constants (grouped by lifecycle: Create, Update, Delete, Restore)
@@ -21,11 +21,10 @@ const OP_CREATE_RELATION: u8 = 5;
 const OP_UPDATE_RELATION: u8 = 6;
 const OP_DELETE_RELATION: u8 = 7;
 const OP_RESTORE_RELATION: u8 = 8;
-const OP_CREATE_PROPERTY: u8 = 9;
 
 // UpdateEntity flags
 const FLAG_HAS_SET_PROPERTIES: u8 = 0x01;
-const FLAG_HAS_UNSET_PROPERTIES: u8 = 0x02;
+const FLAG_HAS_UNSET_VALUES: u8 = 0x02;
 const UPDATE_ENTITY_RESERVED_MASK: u8 = 0xFC;
 
 // CreateRelation flags (bit order matches field order in spec Section 6.4)
@@ -70,7 +69,6 @@ pub fn decode_op<'a>(reader: &mut Reader<'a>, dicts: &WireDictionaries) -> Resul
         OP_UPDATE_RELATION => decode_update_relation(reader, dicts),
         OP_DELETE_RELATION => decode_delete_relation(reader, dicts),
         OP_RESTORE_RELATION => decode_restore_relation(reader, dicts),
-        OP_CREATE_PROPERTY => decode_create_property(reader),
         _ => Err(DecodeError::InvalidOpType { op_type }),
     }
 }
@@ -137,11 +135,11 @@ fn decode_update_entity<'a>(
         }
     }
 
-    if flags & FLAG_HAS_UNSET_PROPERTIES != 0 {
-        let count = reader.read_varint("unset_properties_count")? as usize;
+    if flags & FLAG_HAS_UNSET_VALUES != 0 {
+        let count = reader.read_varint("unset_values_count")? as usize;
         if count > MAX_VALUES_PER_ENTITY {
             return Err(DecodeError::LengthExceedsLimit {
-                field: "unset_properties",
+                field: "unset_values",
                 len: count,
                 max: MAX_VALUES_PER_ENTITY,
             });
@@ -175,7 +173,7 @@ fn decode_update_entity<'a>(
                 UnsetLanguage::Specific(dicts.languages[idx])
             };
 
-            update.unset_properties.push(UnsetProperty { property, language });
+            update.unset_values.push(UnsetValue { property, language });
         }
     }
 
@@ -431,15 +429,6 @@ fn decode_restore_relation<'a>(
     Ok(Op::RestoreRelation(RestoreRelation { id }))
 }
 
-fn decode_create_property<'a>(reader: &mut Reader<'a>) -> Result<Op<'a>, DecodeError> {
-    let id = reader.read_id("property_id")?;
-    let data_type_byte = reader.read_byte("data_type")?;
-    let data_type = DataType::from_u8(data_type_byte)
-        .ok_or(DecodeError::InvalidDataType { data_type: data_type_byte })?;
-
-    Ok(Op::CreateProperty(CreateProperty { id, data_type }))
-}
-
 // =============================================================================
 // ENCODING
 // =============================================================================
@@ -463,7 +452,6 @@ pub fn encode_op(
         Op::UpdateRelation(ur) => encode_update_relation(writer, ur, dict_builder),
         Op::DeleteRelation(dr) => encode_delete_relation(writer, dr, dict_builder),
         Op::RestoreRelation(rr) => encode_restore_relation(writer, rr, dict_builder),
-        Op::CreateProperty(cp) => encode_create_property(writer, cp),
     }
 }
 
@@ -502,8 +490,8 @@ fn encode_update_entity(
     if !ue.set_properties.is_empty() {
         flags |= FLAG_HAS_SET_PROPERTIES;
     }
-    if !ue.unset_properties.is_empty() {
-        flags |= FLAG_HAS_UNSET_PROPERTIES;
+    if !ue.unset_values.is_empty() {
+        flags |= FLAG_HAS_UNSET_VALUES;
     }
     writer.write_byte(flags);
 
@@ -517,9 +505,9 @@ fn encode_update_entity(
         }
     }
 
-    if !ue.unset_properties.is_empty() {
-        writer.write_varint(ue.unset_properties.len() as u64);
-        for unset in &ue.unset_properties {
+    if !ue.unset_values.is_empty() {
+        writer.write_varint(ue.unset_values.len() as u64);
+        for unset in &ue.unset_values {
             // We need the data type to add to dictionary, use a placeholder
             let idx = dict_builder.add_property(unset.property, DataType::Bool);
             writer.write_varint(idx as u64);
@@ -711,13 +699,6 @@ fn encode_restore_relation(
     writer.write_byte(OP_RESTORE_RELATION);
     let id_index = dict_builder.add_object(rr.id);
     writer.write_varint(id_index as u64);
-    Ok(())
-}
-
-fn encode_create_property(writer: &mut Writer, cp: &CreateProperty) -> Result<(), EncodeError> {
-    writer.write_byte(OP_CREATE_PROPERTY);
-    writer.write_id(&cp.id);
-    writer.write_byte(cp.data_type as u8);
     Ok(())
 }
 
@@ -992,23 +973,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_create_property_roundtrip() {
-        let op = Op::CreateProperty(CreateProperty {
-            id: [1u8; 16],
-            data_type: DataType::Text,
-        });
-
-        let mut dict_builder = DictionaryBuilder::new();
-        let property_types = rustc_hash::FxHashMap::default();
-
-        let mut writer = Writer::new();
-        encode_op(&mut writer, &op, &mut dict_builder, &property_types).unwrap();
-
-        let dicts = dict_builder.build();
-        let mut reader = Reader::new(writer.as_bytes());
-        let decoded = decode_op(&mut reader, &dicts).unwrap();
-
-        assert_eq!(op, decoded);
-    }
 }

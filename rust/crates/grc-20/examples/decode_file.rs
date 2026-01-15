@@ -1,7 +1,7 @@
 //! Simple decoder to inspect GRC-20 files.
 
 use std::fs;
-use grc_20::{decode_edit, Op, Value, CreateEntity, UpdateEntity, CreateRelation, DeleteEntity, CreateProperty};
+use grc_20::{decode_edit, Op, Value, CreateEntity, UpdateEntity, CreateRelation, DeleteEntity};
 
 fn format_id(id: &[u8; 16]) -> String {
     format!(
@@ -74,7 +74,6 @@ fn main() {
     let mut create_relation_count = 0;
     let mut update_relation_count = 0;
     let mut delete_relation_count = 0;
-    let mut create_property_count = 0;
     let mut restore_entity_count = 0;
     let mut restore_relation_count = 0;
 
@@ -88,11 +87,8 @@ fn main() {
             Op::UpdateRelation(_) => update_relation_count += 1,
             Op::DeleteRelation(_) => delete_relation_count += 1,
             Op::RestoreRelation(_) => restore_relation_count += 1,
-            Op::CreateProperty(_) => create_property_count += 1,
         }
     }
-
-    println!("  CreateProperty: {}", create_property_count);
     println!("  CreateEntity: {}", create_entity_count);
     println!("  UpdateEntity: {}", update_entity_count);
     println!("  DeleteEntity: {}", delete_entity_count);
@@ -106,9 +102,6 @@ fn main() {
     println!("\n=== First 20 Operations (detail) ===");
     for (i, op) in edit.ops.iter().take(20).enumerate() {
         match op {
-            Op::CreateProperty(CreateProperty { id, data_type }) => {
-                println!("[{}] CreateProperty {} -> {:?}", i, format_id(id), data_type);
-            }
             Op::CreateEntity(CreateEntity { id, values }) => {
                 println!("[{}] CreateEntity {}", i, format_id(id));
                 for pv in values.iter().take(5) {
@@ -118,7 +111,7 @@ fn main() {
                     println!("      ... and {} more values", values.len() - 5);
                 }
             }
-            Op::UpdateEntity(UpdateEntity { id, set_properties, unset_properties }) => {
+            Op::UpdateEntity(UpdateEntity { id, set_properties, unset_values }) => {
                 println!("[{}] UpdateEntity {}", i, format_id(id));
                 for pv in set_properties.iter().take(3) {
                     println!("      SET {} = {}", format_id(&pv.property), format_value(&pv.value));
@@ -126,8 +119,8 @@ fn main() {
                 if set_properties.len() > 3 {
                     println!("      ... and {} more set values", set_properties.len() - 3);
                 }
-                if !unset_properties.is_empty() {
-                    println!("      UNSET {} properties", unset_properties.len());
+                if !unset_values.is_empty() {
+                    println!("      UNSET {} values", unset_values.len());
                 }
             }
             Op::CreateRelation(CreateRelation { id, relation_type, from, to, .. }) => {

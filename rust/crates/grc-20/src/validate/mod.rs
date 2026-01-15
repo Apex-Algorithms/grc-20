@@ -3,6 +3,10 @@
 //! This module provides validation beyond structural encoding checks.
 //! Structural validation happens during decode; semantic validation
 //! requires additional context (schema, entity state).
+//!
+//! **Note:** With the per-edit typing model, type enforcement is advisory.
+//! The protocol does not enforce that a property always uses the same type
+//! across edits. Applications can use SchemaContext to opt-in to type checking.
 
 use std::collections::HashMap;
 
@@ -10,9 +14,13 @@ use crate::error::ValidationError;
 use crate::model::{DataType, Edit, Id, Op, PropertyValue, Value};
 
 /// Schema context for semantic validation.
+///
+/// Applications can use this to register expected types for properties
+/// and validate that values match those types. This is advisory—the
+/// protocol does not enforce global type consistency.
 #[derive(Debug, Clone, Default)]
 pub struct SchemaContext {
-    /// Known property data types.
+    /// Known property data types (advisory).
     properties: HashMap<Id, DataType>,
 }
 
@@ -22,12 +30,12 @@ impl SchemaContext {
         Self::default()
     }
 
-    /// Registers a property with its data type.
+    /// Registers a property with its expected data type.
     pub fn add_property(&mut self, id: Id, data_type: DataType) {
         self.properties.insert(id, data_type);
     }
 
-    /// Gets the data type for a property, if known.
+    /// Gets the expected data type for a property, if registered.
     pub fn get_property_type(&self, id: &Id) -> Option<DataType> {
         self.properties.get(id).copied()
     }
@@ -36,35 +44,19 @@ impl SchemaContext {
 /// Validates an edit against a schema context.
 ///
 /// This performs semantic validation that requires context:
-/// - Value types match property data types
-/// - DataType declarations are consistent with existing schema
+/// - Value types match property data types (when registered in schema)
 ///
-/// Note: Entity lifecycle (DELETED/ACTIVE) validation requires state context
+/// Note: Type checking is advisory. Unknown properties are allowed.
+/// Entity lifecycle (DELETED/ACTIVE) validation requires state context
 /// and is not performed here.
 pub fn validate_edit(edit: &Edit, schema: &SchemaContext) -> Result<(), ValidationError> {
-    // Build a local schema from CreateProperty ops in this edit
-    let mut local_schema = schema.clone();
-
     for op in &edit.ops {
         match op {
-            Op::CreateProperty(cp) => {
-                // Check consistency with existing schema
-                if let Some(existing) = schema.get_property_type(&cp.id) {
-                    if existing != cp.data_type {
-                        return Err(ValidationError::DataTypeInconsistent {
-                            property: cp.id,
-                            schema: existing,
-                            declared: cp.data_type,
-                        });
-                    }
-                }
-                local_schema.add_property(cp.id, cp.data_type);
-            }
             Op::CreateEntity(ce) => {
-                validate_property_values(&ce.values, &local_schema)?;
+                validate_property_values(&ce.values, schema)?;
             }
             Op::UpdateEntity(ue) => {
-                validate_property_values(&ue.set_properties, &local_schema)?;
+                validate_property_values(&ue.set_properties, schema)?;
             }
             _ => {}
         }
@@ -118,7 +110,7 @@ mod tests {
     use std::borrow::Cow;
 
     use super::*;
-    use crate::model::{CreateEntity, CreateProperty};
+    use crate::model::CreateEntity;
 
     #[test]
     fn test_validate_type_mismatch() {
@@ -170,29 +162,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_datatype_inconsistent() {
-        let mut schema = SchemaContext::new();
-        schema.add_property([1u8; 16], DataType::Int64);
-
-        let edit = Edit {
-            id: [0u8; 16],
-            name: Cow::Borrowed(""),
-            authors: vec![],
-            created_at: 0,
-            ops: vec![Op::CreateProperty(CreateProperty {
-                id: [1u8; 16],
-                data_type: DataType::Text, // Conflicts with schema!
-            })],
-        };
-
-        let result = validate_edit(&edit, &schema);
-        assert!(matches!(
-            result,
-            Err(ValidationError::DataTypeInconsistent { .. })
-        ));
-    }
-
-    #[test]
     fn test_validate_unknown_property() {
         let schema = SchemaContext::new(); // Empty schema
 
@@ -213,40 +182,7 @@ mod tests {
             })],
         };
 
-        // Unknown properties are allowed (might be defined elsewhere)
-        let result = validate_edit(&edit, &schema);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_inline_create_property() {
-        let schema = SchemaContext::new();
-
-        let edit = Edit {
-            id: [0u8; 16],
-            name: Cow::Borrowed(""),
-            authors: vec![],
-            created_at: 0,
-            ops: vec![
-                // First create the property
-                Op::CreateProperty(CreateProperty {
-                    id: [1u8; 16],
-                    data_type: DataType::Text,
-                }),
-                // Then use it
-                Op::CreateEntity(CreateEntity {
-                    id: [2u8; 16],
-                    values: vec![PropertyValue {
-                        property: [1u8; 16],
-                        value: Value::Text {
-                            value: Cow::Owned("test".to_string()),
-                            language: None,
-                        },
-                    }],
-                }),
-            ],
-        };
-
+        // Unknown properties are allowed (advisory type checking)
         let result = validate_edit(&edit, &schema);
         assert!(result.is_ok());
     }
