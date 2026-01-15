@@ -4,7 +4,6 @@ import type {
   CreateRelation,
   Op,
 } from "../types/op.js";
-import { DataType } from "../types/value.js";
 import { EntityBuilder } from "./entity.js";
 import { UpdateEntityBuilder } from "./update.js";
 import { RelationBuilder } from "./relation.js";
@@ -61,18 +60,6 @@ export class EditBuilder {
    */
   setCreatedNow(): this {
     this.createdAt = BigInt(Date.now()) * 1000n;
-    return this;
-  }
-
-  // =========================================================================
-  // Property Operations
-  // =========================================================================
-
-  /**
-   * Adds a CreateProperty operation.
-   */
-  createProperty(id: Id, dataType: DataType): this {
-    this.ops.push({ type: "createProperty", id, dataType });
     return this;
   }
 

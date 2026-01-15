@@ -23,29 +23,25 @@ grc-20 = "0.1"
 
 ```rust
 use grc_20::{
-    Edit, Op, CreateEntity, CreateProperty, PropertyValue, Value, DataType,
+    Edit, Op, CreateEntity, PropertyValue, Value,
     encode_edit, decode_edit, genesis::properties,
 };
+use std::borrow::Cow;
 
-// Create an edit with a property and entity
+// Create an edit with an entity
 let edit = Edit {
     id: [1u8; 16],
-    name: "My Edit".to_string(),
+    name: Cow::Borrowed("My Edit"),
     authors: vec![[2u8; 16]],
     created_at: 1704067200_000_000, // microseconds since epoch
     ops: vec![
-        // Define a property
-        Op::CreateProperty(CreateProperty {
-            id: [10u8; 16],
-            data_type: DataType::Text,
-        }),
         // Create an entity with a value
         Op::CreateEntity(CreateEntity {
             id: [3u8; 16],
             values: vec![PropertyValue {
-                property: [10u8; 16],
+                property: properties::name(),
                 value: Value::Text {
-                    value: "Alice".to_string(),
+                    value: Cow::Borrowed("Alice"),
                     language: None,
                 },
             }],
@@ -83,15 +79,16 @@ All 11 GRC-20 data types are supported:
 
 ### Operations
 
-All 7 operation types:
+All 8 operation types:
 
 - `CreateEntity` — Create or upsert an entity
-- `UpdateEntity` — Modify entity values (set, add, remove, unset)
+- `UpdateEntity` — Modify entity values (set/unset)
 - `DeleteEntity` — Tombstone an entity
-- `CreateRelation` — Create a directed edge (instance or unique mode)
-- `UpdateRelation` — Update relation position
+- `RestoreEntity` — Restore a deleted entity
+- `CreateRelation` — Create a directed relation
+- `UpdateRelation` — Update relation's mutable fields
 - `DeleteRelation` — Tombstone a relation
-- `CreateProperty` — Define a property in the schema
+- `RestoreRelation` — Restore a deleted relation
 
 ### Compression
 
@@ -164,7 +161,7 @@ The decoder automatically detects and handles both formats.
 
 ## Spec Compliance
 
-Implements GRC-20 v2 specification version 0.16.0.
+Implements GRC-20 v2 specification version 0.17.0.
 
 ## License
 

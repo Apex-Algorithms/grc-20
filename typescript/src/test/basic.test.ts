@@ -21,7 +21,6 @@ import {
   types,
   relationTypes,
   languages,
-  DataType,
   idsEqual,
 } from "../index.js";
 
@@ -333,27 +332,6 @@ describe("Codec", () => {
     const updateRel = decoded.ops[3];
     if (updateRel.type === "updateRelation") {
       expect(updateRel.position).toBe("abc");
-    }
-  });
-
-  it("encodes and decodes createProperty", () => {
-    const editId = randomId();
-    const propId = randomId();
-
-    const edit = new EditBuilder(editId)
-      .createProperty(propId, DataType.Text)
-      .build();
-
-    const encoded = encodeEdit(edit);
-    const decoded = decodeEdit(encoded);
-
-    expect(decoded.ops.length).toBe(1);
-    expect(decoded.ops[0].type).toBe("createProperty");
-
-    const op = decoded.ops[0];
-    if (op.type === "createProperty") {
-      expect(idsEqual(op.id, propId)).toBe(true);
-      expect(op.dataType).toBe(DataType.Text);
     }
   });
 

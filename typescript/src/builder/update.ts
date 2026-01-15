@@ -1,5 +1,5 @@
 import type { Id } from "../types/id.js";
-import type { UnsetLanguage, UnsetProperty } from "../types/op.js";
+import type { UnsetLanguage, UnsetValue } from "../types/op.js";
 import type { DecimalMantissa, PropertyValue, Value } from "../types/value.js";
 import { EmbeddingSubType } from "../types/value.js";
 
@@ -9,7 +9,7 @@ import { EmbeddingSubType } from "../types/value.js";
 export class UpdateEntityBuilder {
   private readonly _id: Id;
   private _set: PropertyValue[] = [];
-  private _unset: UnsetProperty[] = [];
+  private _unset: UnsetValue[] = [];
 
   constructor(id: Id) {
     this._id = id;
@@ -219,7 +219,7 @@ export class UpdateEntityBuilder {
   /**
    * Returns the built unset array.
    */
-  getUnset(): UnsetProperty[] {
+  getUnset(): UnsetValue[] {
     return this._unset;
   }
 }

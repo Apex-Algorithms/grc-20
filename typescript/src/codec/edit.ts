@@ -238,10 +238,6 @@ function buildDictionaries(ops: Op[]): DictionaryBuilder {
       case "restoreRelation":
         addObject(op.id);
         break;
-
-      case "createProperty":
-        // ID is inline
-        break;
     }
   }
 

@@ -1,7 +1,6 @@
 import type { Id } from "../types/id.js";
 import type {
   CreateEntity,
-  CreateProperty,
   CreateRelation,
   DeleteEntity,
   DeleteRelation,
@@ -9,14 +8,13 @@ import type {
   RestoreEntity,
   RestoreRelation,
   UnsetLanguage,
-  UnsetProperty,
+  UnsetValue,
   UnsetRelationField,
   UpdateEntity,
   UpdateRelation,
 } from "../types/op.js";
 import {
   OP_TYPE_CREATE_ENTITY,
-  OP_TYPE_CREATE_PROPERTY,
   OP_TYPE_CREATE_RELATION,
   OP_TYPE_DELETE_ENTITY,
   OP_TYPE_DELETE_RELATION,
@@ -26,7 +24,6 @@ import {
   OP_TYPE_UPDATE_RELATION,
 } from "../types/op.js";
 import type { PropertyValue } from "../types/value.js";
-import { DataType } from "../types/value.js";
 import { DecodeError, Reader, Writer } from "./primitives.js";
 import {
   decodePropertyValue,
@@ -53,7 +50,7 @@ export interface OpDictionaryLookups extends DictionaryLookups {
 
 // UpdateEntity flags
 const UPDATE_HAS_SET_PROPERTIES = 0x01;
-const UPDATE_HAS_UNSET_PROPERTIES = 0x02;
+const UPDATE_HAS_UNSET_VALUES = 0x02;
 
 // CreateRelation flags
 const RELATION_HAS_FROM_SPACE = 0x01;
@@ -106,9 +103,6 @@ export function encodeOp(writer: Writer, op: Op, dicts: OpDictionaryIndices): vo
     case "restoreRelation":
       encodeRestoreRelation(writer, op, dicts);
       break;
-    case "createProperty":
-      encodeCreateProperty(writer, op);
-      break;
   }
 }
 
@@ -127,7 +121,7 @@ function encodeUpdateEntity(writer: Writer, op: UpdateEntity, dicts: OpDictionar
 
   let flags = 0;
   if (op.set.length > 0) flags |= UPDATE_HAS_SET_PROPERTIES;
-  if (op.unset.length > 0) flags |= UPDATE_HAS_UNSET_PROPERTIES;
+  if (op.unset.length > 0) flags |= UPDATE_HAS_UNSET_VALUES;
   writer.writeByte(flags);
 
   if (op.set.length > 0) {
@@ -140,12 +134,12 @@ function encodeUpdateEntity(writer: Writer, op: UpdateEntity, dicts: OpDictionar
   if (op.unset.length > 0) {
     writer.writeVarintNumber(op.unset.length);
     for (const u of op.unset) {
-      encodeUnsetProperty(writer, u, dicts);
+      encodeUnsetValue(writer, u, dicts);
     }
   }
 }
 
-function encodeUnsetProperty(writer: Writer, unset: UnsetProperty, dicts: DictionaryIndices): void {
+function encodeUnsetValue(writer: Writer, unset: UnsetValue, dicts: DictionaryIndices): void {
   writer.writeVarintNumber(dicts.getPropertyIndex(unset.property));
   encodeUnsetLanguage(writer, unset.language, dicts);
 }
@@ -258,12 +252,6 @@ function encodeRestoreRelation(writer: Writer, op: RestoreRelation, dicts: OpDic
   writer.writeVarintNumber(dicts.getObjectIndex(op.id));
 }
 
-function encodeCreateProperty(writer: Writer, op: CreateProperty): void {
-  writer.writeByte(OP_TYPE_CREATE_PROPERTY);
-  writer.writeId(op.id);
-  writer.writeByte(op.dataType);
-}
-
 /**
  * Decodes a single operation.
  */
@@ -287,8 +275,6 @@ export function decodeOp(reader: Reader, dicts: OpDictionaryLookups): Op {
       return decodeDeleteRelation(reader, dicts);
     case OP_TYPE_RESTORE_RELATION:
       return decodeRestoreRelation(reader, dicts);
-    case OP_TYPE_CREATE_PROPERTY:
-      return decodeCreateProperty(reader);
     default:
       throw new DecodeError("E005", `invalid op type: ${opType}`);
   }
@@ -321,18 +307,18 @@ function decodeUpdateEntity(reader: Reader, dicts: OpDictionaryLookups): UpdateE
     }
   }
 
-  const unset: UnsetProperty[] = [];
-  if (flags & UPDATE_HAS_UNSET_PROPERTIES) {
+  const unset: UnsetValue[] = [];
+  if (flags & UPDATE_HAS_UNSET_VALUES) {
     const count = reader.readVarintNumber();
     for (let i = 0; i < count; i++) {
-      unset.push(decodeUnsetProperty(reader, dicts));
+      unset.push(decodeUnsetValue(reader, dicts));
     }
   }
 
   return { type: "updateEntity", id, set, unset };
 }
 
-function decodeUnsetProperty(reader: Reader, dicts: DictionaryLookups): UnsetProperty {
+function decodeUnsetValue(reader: Reader, dicts: DictionaryLookups): UnsetValue {
   const propIndex = reader.readVarintNumber();
   const prop = dicts.getProperty(propIndex);
   const language = decodeUnsetLanguage(reader, dicts);
@@ -452,14 +438,4 @@ function decodeDeleteRelation(reader: Reader, dicts: OpDictionaryLookups): Delet
 function decodeRestoreRelation(reader: Reader, dicts: OpDictionaryLookups): RestoreRelation {
   const id = dicts.getObject(reader.readVarintNumber());
   return { type: "restoreRelation", id };
-}
-
-function decodeCreateProperty(reader: Reader): CreateProperty {
-  const id = reader.readId();
-  const dataTypeByte = reader.readByte();
-  if (dataTypeByte < 1 || dataTypeByte > 10) {
-    throw new DecodeError("E005", `invalid data type: ${dataTypeByte}`);
-  }
-  const dataType = dataTypeByte as DataType;
-  return { type: "createProperty", id, dataType };
 }

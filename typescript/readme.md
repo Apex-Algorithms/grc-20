@@ -118,7 +118,7 @@ const edit = new EditBuilder(editId)
     .bytes(propId, new Uint8Array([1, 2, 3]))
     .point(propId, 40.7128, -74.006)
     .date(propId, "2024-01-15")
-    .timestamp(propId, 1704067200000000n)
+    .datetime(propId, "2024-01-15T10:30:00Z")
   )
   .updateEntity(entityId, u => u
     .setText(propId, "new value", undefined)
@@ -126,10 +126,13 @@ const edit = new EditBuilder(editId)
   )
   .deleteEntity(entityId)
   .restoreEntity(entityId)
-  .createRelationUnique(fromId, toId, relationTypeId)
-  .createRelationMany(relationId, fromId, toId, relationTypeId)
+  .createRelation(r => r
+    .id(relationId)
+    .from(fromId)
+    .to(toId)
+    .relationType(relationTypeId)
+  )
   .deleteRelation(relationId)
-  .createProperty(propId, DataType.Text)
   .build();
 ```
 

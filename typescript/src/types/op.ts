@@ -1,8 +1,8 @@
 import type { Id } from "./id.js";
-import type { DataType, PropertyValue } from "./value.js";
+import type { PropertyValue } from "./value.js";
 
 /**
- * Specifies which language slot to clear for an UnsetProperty.
+ * Specifies which language slot to clear for an UnsetValue.
  */
 export type UnsetLanguage =
   | { type: "all" }
@@ -20,9 +20,9 @@ export type UnsetRelationField =
   | "position";
 
 /**
- * Specifies a property to unset, with optional language targeting (TEXT only).
+ * Specifies a value to unset, with optional language targeting (TEXT only).
  */
-export interface UnsetProperty {
+export interface UnsetValue {
   property: Id;
   language: UnsetLanguage;
 }
@@ -50,7 +50,7 @@ export interface UpdateEntity {
   type: "updateEntity";
   id: Id;
   set: PropertyValue[];
-  unset: UnsetProperty[];
+  unset: UnsetValue[];
 }
 
 /**
@@ -126,15 +126,6 @@ export interface RestoreRelation {
 }
 
 /**
- * Creates a property in the schema (spec Section 3.4).
- */
-export interface CreateProperty {
-  type: "createProperty";
-  id: Id;
-  dataType: DataType;
-}
-
-/**
  * An atomic operation that modifies graph state (spec Section 3.1).
  */
 export type Op =
@@ -145,8 +136,7 @@ export type Op =
   | CreateRelation
   | UpdateRelation
   | DeleteRelation
-  | RestoreRelation
-  | CreateProperty;
+  | RestoreRelation;
 
 /**
  * Op type codes for wire encoding.
@@ -159,7 +149,6 @@ export const OP_TYPE_CREATE_RELATION = 5;
 export const OP_TYPE_UPDATE_RELATION = 6;
 export const OP_TYPE_DELETE_RELATION = 7;
 export const OP_TYPE_RESTORE_RELATION = 8;
-export const OP_TYPE_CREATE_PROPERTY = 9;
 
 /**
  * Returns the op type code for wire encoding.
@@ -182,8 +171,6 @@ export function opTypeCode(op: Op): number {
       return OP_TYPE_DELETE_RELATION;
     case "restoreRelation":
       return OP_TYPE_RESTORE_RELATION;
-    case "createProperty":
-      return OP_TYPE_CREATE_PROPERTY;
   }
 }
 
