@@ -42,5 +42,8 @@ pub const MAGIC_UNCOMPRESSED: &[u8; 4] = b"GRC2";
 /// Magic bytes for zstd-compressed edits.
 pub const MAGIC_COMPRESSED: &[u8; 5] = b"GRC2Z";
 
-/// Current binary format version.
+/// Current binary format version (for encoding).
 pub const FORMAT_VERSION: u8 = 1;
+
+/// Minimum supported format version (for decoding).
+pub const MIN_FORMAT_VERSION: u8 = 0;

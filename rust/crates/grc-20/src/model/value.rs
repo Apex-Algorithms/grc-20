@@ -17,9 +17,11 @@ pub enum DataType {
     Text = 5,
     Bytes = 6,
     Date = 7,
-    Schedule = 8,
-    Point = 9,
-    Embedding = 10,
+    Time = 8,
+    Datetime = 9,
+    Schedule = 10,
+    Point = 11,
+    Embedding = 12,
 }
 
 impl DataType {
@@ -33,9 +35,11 @@ impl DataType {
             5 => Some(DataType::Text),
             6 => Some(DataType::Bytes),
             7 => Some(DataType::Date),
-            8 => Some(DataType::Schedule),
-            9 => Some(DataType::Point),
-            10 => Some(DataType::Embedding),
+            8 => Some(DataType::Time),
+            9 => Some(DataType::Datetime),
+            10 => Some(DataType::Schedule),
+            11 => Some(DataType::Point),
+            12 => Some(DataType::Embedding),
             _ => None,
         }
     }
@@ -145,8 +149,14 @@ pub enum Value<'a> {
     /// Opaque byte array.
     Bytes(Cow<'a, [u8]>),
 
-    /// ISO 8601 date string (variable precision).
+    /// ISO 8601 date string (YYYY, YYYY-MM, or YYYY-MM-DD).
     Date(Cow<'a, str>),
+
+    /// ISO 8601 time string with timezone (HH:MM:SS[.frac]TZ).
+    Time(Cow<'a, str>),
+
+    /// ISO 8601 datetime string (YYYY-MM-DDTHH:MM:SS[.frac][TZ]).
+    Datetime(Cow<'a, str>),
 
     /// RFC 5545 iCalendar schedule string.
     Schedule(Cow<'a, str>),
@@ -181,6 +191,8 @@ impl Value<'_> {
             Value::Text { .. } => DataType::Text,
             Value::Bytes(_) => DataType::Bytes,
             Value::Date(_) => DataType::Date,
+            Value::Time(_) => DataType::Time,
+            Value::Datetime(_) => DataType::Datetime,
             Value::Schedule(_) => DataType::Schedule,
             Value::Point { .. } => DataType::Point,
             Value::Embedding { .. } => DataType::Embedding,

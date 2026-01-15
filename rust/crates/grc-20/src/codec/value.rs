@@ -30,6 +30,8 @@ pub fn decode_value<'a>(
         DataType::Text => decode_text(reader, dicts),
         DataType::Bytes => decode_bytes(reader),
         DataType::Date => decode_date(reader),
+        DataType::Time => decode_time(reader),
+        DataType::Datetime => decode_datetime(reader),
         DataType::Schedule => decode_schedule(reader),
         DataType::Point => decode_point(reader),
         DataType::Embedding => decode_embedding(reader),
@@ -253,126 +255,35 @@ fn decode_bytes<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
 
 fn decode_date<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
     let value = reader.read_str(MAX_STRING_LEN, "date")?;
-    validate_iso8601_date(value)?;
+    // Basic validation: DATE should not contain 'T' (that's DATETIME)
+    if value.contains('T') {
+        return Err(DecodeError::MalformedEncoding {
+            context: "DATE should not contain 'T' separator (use DATETIME instead)",
+        });
+    }
     Ok(Value::Date(Cow::Borrowed(value)))
 }
 
-/// Validates an ISO 8601 calendar date string.
-///
-/// Accepts:
-/// - Year only: "2024" or "-0100" (BCE)
-/// - Year-month: "2024-03" or "-0100-03"
-/// - Full date: "2024-03-15" or "-0100-03-15"
-///
-/// Per spec Section 2.4: implementations SHOULD reject clearly malformed dates.
-fn validate_iso8601_date(s: &str) -> Result<(), DecodeError> {
-    if s.is_empty() {
+fn decode_time<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
+    let value = reader.read_str(MAX_STRING_LEN, "time")?;
+    // Basic validation: TIME should have timezone (Z or +/- offset)
+    if !value.contains('Z') && !value.contains('+') && !value.rfind('-').map(|p| p >= 8).unwrap_or(false) {
         return Err(DecodeError::MalformedEncoding {
-            context: "DATE string is empty",
+            context: "TIME must include timezone (Z or offset)",
         });
     }
-
-    // Handle optional leading '-' for BCE years
-    let (negative, rest) = if let Some(stripped) = s.strip_prefix('-') {
-        (true, stripped)
-    } else {
-        (false, s)
-    };
-
-    // Split by '-' to get components
-    let parts: Vec<&str> = rest.split('-').collect();
-
-    match parts.len() {
-        1 => {
-            // Year only: "2024" or "0100" (with leading '-' = BCE)
-            validate_year_part(parts[0], negative)?;
-        }
-        2 => {
-            // Year-month: "2024-03"
-            validate_year_part(parts[0], negative)?;
-            validate_month_part(parts[1])?;
-        }
-        3 => {
-            // Full date: "2024-03-15"
-            validate_year_part(parts[0], negative)?;
-            let month = validate_month_part(parts[1])?;
-            validate_day_part(parts[2], month)?;
-        }
-        _ => {
-            return Err(DecodeError::MalformedEncoding {
-                context: "DATE has too many components",
-            });
-        }
-    }
-
-    Ok(())
+    Ok(Value::Time(Cow::Borrowed(value)))
 }
 
-fn validate_year_part(s: &str, is_bce: bool) -> Result<u32, DecodeError> {
-    // Year must be at least 4 digits (can be more for far future/past)
-    if s.len() < 4 {
+fn decode_datetime<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
+    let value = reader.read_str(MAX_STRING_LEN, "datetime")?;
+    // Basic validation: DATETIME should contain 'T'
+    if !value.contains('T') {
         return Err(DecodeError::MalformedEncoding {
-            context: "DATE year must be at least 4 digits",
+            context: "DATETIME must contain 'T' separator",
         });
     }
-    // Must be all digits
-    if !s.chars().all(|c| c.is_ascii_digit()) {
-        return Err(DecodeError::MalformedEncoding {
-            context: "DATE year contains non-digit characters",
-        });
-    }
-    // Reject "-0000" as redundant (use "0000" instead which equals 1 BCE in astronomical numbering)
-    if is_bce && s.chars().all(|c| c == '0') {
-        return Err(DecodeError::MalformedEncoding {
-            context: "DATE -0000 is invalid (use 0000 for 1 BCE)",
-        });
-    }
-    s.parse::<u32>().map_err(|_| DecodeError::MalformedEncoding {
-        context: "DATE year is not a valid number",
-    })
-}
-
-fn validate_month_part(s: &str) -> Result<u32, DecodeError> {
-    if s.len() != 2 {
-        return Err(DecodeError::MalformedEncoding {
-            context: "DATE month must be 2 digits",
-        });
-    }
-    let month = s.parse::<u32>().map_err(|_| DecodeError::MalformedEncoding {
-        context: "DATE month is not a valid number",
-    })?;
-    if !(1..=12).contains(&month) {
-        return Err(DecodeError::MalformedEncoding {
-            context: "DATE month out of range (must be 01-12)",
-        });
-    }
-    Ok(month)
-}
-
-fn validate_day_part(s: &str, month: u32) -> Result<u32, DecodeError> {
-    if s.len() != 2 {
-        return Err(DecodeError::MalformedEncoding {
-            context: "DATE day must be 2 digits",
-        });
-    }
-    let day = s.parse::<u32>().map_err(|_| DecodeError::MalformedEncoding {
-        context: "DATE day is not a valid number",
-    })?;
-
-    // Max days per month (not checking leap years - that would require year context)
-    let max_day = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 => 29, // Allow 29 for Feb (leap year possibility)
-        _ => 31, // Already validated month, but be safe
-    };
-
-    if day == 0 || day > max_day {
-        return Err(DecodeError::MalformedEncoding {
-            context: "DATE day out of range",
-        });
-    }
-    Ok(day)
+    Ok(Value::Datetime(Cow::Borrowed(value)))
 }
 
 fn decode_schedule<'a>(reader: &mut Reader<'a>) -> Result<Value<'a>, DecodeError> {
@@ -529,9 +440,32 @@ pub fn encode_value(
         Value::Bytes(bytes) => {
             writer.write_bytes_prefixed(bytes);
         }
-        Value::Date(s) => {
-            validate_iso8601_date_for_encode(s)?;
-            writer.write_string(s);
+        Value::Date(value) => {
+            // DATE should not contain 'T' (that's DATETIME)
+            if value.contains('T') {
+                return Err(EncodeError::InvalidDate {
+                    reason: "DATE should not contain 'T' separator (use DATETIME instead)",
+                });
+            }
+            writer.write_string(value);
+        }
+        Value::Time(value) => {
+            // TIME must have timezone
+            if !value.contains('Z') && !value.contains('+') && !value.rfind('-').map(|p| p >= 8).unwrap_or(false) {
+                return Err(EncodeError::InvalidInput {
+                    context: "TIME must include timezone (Z or offset)",
+                });
+            }
+            writer.write_string(value);
+        }
+        Value::Datetime(value) => {
+            // DATETIME must contain 'T'
+            if !value.contains('T') {
+                return Err(EncodeError::InvalidInput {
+                    context: "DATETIME must contain 'T' separator",
+                });
+            }
+            writer.write_string(value);
         }
         Value::Schedule(s) => {
             // RFC 5545 iCalendar format
@@ -643,18 +577,6 @@ pub fn encode_property_value(
     writer.write_varint(prop_index as u64);
     encode_value(writer, &pv.value, dict_builder)?;
     Ok(())
-}
-
-/// Validates an ISO 8601 date string for encoding.
-fn validate_iso8601_date_for_encode(s: &str) -> Result<(), EncodeError> {
-    validate_iso8601_date(s).map_err(|e| {
-        // Extract the context message from the decode error
-        let reason = match e {
-            DecodeError::MalformedEncoding { context } => context,
-            _ => "invalid format",
-        };
-        EncodeError::InvalidDate { reason }
-    })
 }
 
 /// Validates a position string according to spec rules.
@@ -891,55 +813,128 @@ mod tests {
     }
 
     #[test]
-    fn test_date_validation_valid() {
-        // Year only
-        assert!(validate_iso8601_date("2024").is_ok());
-        assert!(validate_iso8601_date("0001").is_ok());
-        assert!(validate_iso8601_date("9999").is_ok());
+    fn test_date_roundtrip() {
+        let dicts = WireDictionaries::default();
+        let mut dict_builder = DictionaryBuilder::new();
 
-        // BCE year
-        assert!(validate_iso8601_date("-0100").is_ok());
-        assert!(validate_iso8601_date("-2024").is_ok());
+        // Test various date formats
+        let test_cases = [
+            "2024",
+            "2024-03",
+            "2024-03-15",
+            "-0100",
+            "-0100-03-15",
+        ];
 
-        // Year-month
-        assert!(validate_iso8601_date("2024-01").is_ok());
-        assert!(validate_iso8601_date("2024-12").is_ok());
-        assert!(validate_iso8601_date("-0100-03").is_ok());
+        for date_str in test_cases {
+            let value = Value::Date(Cow::Owned(date_str.to_string()));
 
-        // Full date
-        assert!(validate_iso8601_date("2024-03-15").is_ok());
-        assert!(validate_iso8601_date("2024-02-29").is_ok()); // Leap year possibility
-        assert!(validate_iso8601_date("-0100-03-15").is_ok());
+            let mut writer = Writer::new();
+            encode_value(&mut writer, &value, &mut dict_builder).unwrap();
+
+            let mut reader = Reader::new(writer.as_bytes());
+            let decoded = decode_value(&mut reader, DataType::Date, &dicts).unwrap();
+
+            match (&value, &decoded) {
+                (Value::Date(v1), Value::Date(v2)) => {
+                    assert_eq!(v1.as_ref(), v2.as_ref());
+                }
+                _ => panic!("expected Date values"),
+            }
+        }
     }
 
     #[test]
-    fn test_date_validation_invalid() {
-        // Empty
-        assert!(validate_iso8601_date("").is_err());
+    fn test_time_roundtrip() {
+        let dicts = WireDictionaries::default();
+        let mut dict_builder = DictionaryBuilder::new();
 
-        // Too few digits for year
-        assert!(validate_iso8601_date("24").is_err());
-        assert!(validate_iso8601_date("202").is_err());
+        // Test various time formats (all with timezone)
+        let test_cases = [
+            "14:30:00Z",
+            "14:30:00.000Z",
+            "14:30:00+05:30",
+            "00:00:00Z",
+        ];
 
-        // Invalid month
-        assert!(validate_iso8601_date("2024-00").is_err());
-        assert!(validate_iso8601_date("2024-13").is_err());
+        for time_str in test_cases {
+            let value = Value::Time(Cow::Owned(time_str.to_string()));
 
-        // Invalid day
-        assert!(validate_iso8601_date("2024-03-00").is_err());
-        assert!(validate_iso8601_date("2024-03-32").is_err());
-        assert!(validate_iso8601_date("2024-02-30").is_err()); // Feb max is 29
-        assert!(validate_iso8601_date("2024-04-31").is_err()); // April has 30 days
+            let mut writer = Writer::new();
+            encode_value(&mut writer, &value, &mut dict_builder).unwrap();
 
-        // BCE year 0 is invalid
-        assert!(validate_iso8601_date("-0000").is_err());
+            let mut reader = Reader::new(writer.as_bytes());
+            let decoded = decode_value(&mut reader, DataType::Time, &dicts).unwrap();
 
-        // Non-numeric
-        assert!(validate_iso8601_date("XXXX").is_err());
-        assert!(validate_iso8601_date("2024-XX").is_err());
+            match (&value, &decoded) {
+                (Value::Time(v1), Value::Time(v2)) => {
+                    assert_eq!(v1.as_ref(), v2.as_ref());
+                }
+                _ => panic!("expected Time values"),
+            }
+        }
+    }
 
-        // Too many components
-        assert!(validate_iso8601_date("2024-03-15-00").is_err());
+    #[test]
+    fn test_datetime_roundtrip() {
+        let dicts = WireDictionaries::default();
+        let mut dict_builder = DictionaryBuilder::new();
+
+        // Test various datetime formats
+        let test_cases = [
+            "2024-03-15T14:30:00",
+            "2024-03-15T14:30:00Z",
+            "2024-03-15T14:30:00.000Z",
+            "2024-03-15T14:30:00+05:30",
+            "2025-11-18T05:00:00.000Z",
+        ];
+
+        for dt_str in test_cases {
+            let value = Value::Datetime(Cow::Owned(dt_str.to_string()));
+
+            let mut writer = Writer::new();
+            encode_value(&mut writer, &value, &mut dict_builder).unwrap();
+
+            let mut reader = Reader::new(writer.as_bytes());
+            let decoded = decode_value(&mut reader, DataType::Datetime, &dicts).unwrap();
+
+            match (&value, &decoded) {
+                (Value::Datetime(v1), Value::Datetime(v2)) => {
+                    assert_eq!(v1.as_ref(), v2.as_ref());
+                }
+                _ => panic!("expected Datetime values"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_date_validation() {
+        let mut dict_builder = DictionaryBuilder::new();
+
+        // DATE should reject strings with 'T'
+        let invalid = Value::Date(Cow::Borrowed("2024-03-15T14:30:00Z"));
+        let mut writer = Writer::new();
+        assert!(encode_value(&mut writer, &invalid, &mut dict_builder).is_err());
+    }
+
+    #[test]
+    fn test_time_validation() {
+        let mut dict_builder = DictionaryBuilder::new();
+
+        // TIME should reject strings without timezone
+        let invalid = Value::Time(Cow::Borrowed("14:30:00"));
+        let mut writer = Writer::new();
+        assert!(encode_value(&mut writer, &invalid, &mut dict_builder).is_err());
+    }
+
+    #[test]
+    fn test_datetime_validation() {
+        let mut dict_builder = DictionaryBuilder::new();
+
+        // DATETIME should reject strings without 'T'
+        let invalid = Value::Datetime(Cow::Borrowed("2024-03-15"));
+        let mut writer = Writer::new();
+        assert!(encode_value(&mut writer, &invalid, &mut dict_builder).is_err());
     }
 
     #[test]
@@ -1018,25 +1013,80 @@ mod tests {
     }
 
     #[test]
-    fn test_date_roundtrip() {
-        let dicts = WireDictionaries::default();
-        let mut dict_builder = DictionaryBuilder::new();
+    fn test_date_helpers() {
+        // Test extracting date part from datetime
+        assert_eq!(extract_date_part("2024-03-15T14:30:00Z"), "2024-03-15");
+        assert_eq!(extract_date_part("2024-03-15T00:00:00.000Z"), "2024-03-15");
+        assert_eq!(extract_date_part("2025-11-18T05:00:00.000Z"), "2025-11-18");
+        assert_eq!(extract_date_part("2024-03-15"), "2024-03-15");
+        assert_eq!(extract_date_part("2024-03"), "2024-03");
+        assert_eq!(extract_date_part("2024"), "2024");
 
-        for date_str in ["2024", "2024-03", "2024-03-15", "-0100", "-0100-03-15"] {
-            let value = Value::Date(Cow::Owned(date_str.to_string()));
+        // Test converting date to datetime
+        assert_eq!(date_to_datetime("2024-03-15"), "2024-03-15T00:00:00.000Z");
+        assert_eq!(date_to_datetime("2024-03"), "2024-03-01T00:00:00.000Z");
+        assert_eq!(date_to_datetime("2024"), "2024-01-01T00:00:00.000Z");
+        // Datetime should pass through unchanged
+        assert_eq!(date_to_datetime("2024-03-15T14:30:00Z"), "2024-03-15T14:30:00Z");
+    }
+}
 
-            let mut writer = Writer::new();
-            encode_value(&mut writer, &value, &mut dict_builder).unwrap();
+// =============================================================================
+// DATE HELPERS
+// =============================================================================
 
-            let mut reader = Reader::new(writer.as_bytes());
-            let decoded = decode_value(&mut reader, DataType::Date, &dicts).unwrap();
+/// Extracts the date part from an ISO 8601 date or datetime string.
+///
+/// Examples:
+/// - "2024-03-15T14:30:00Z" -> "2024-03-15"
+/// - "2024-03-15" -> "2024-03-15"
+/// - "2024-03" -> "2024-03"
+/// - "2024" -> "2024"
+pub fn extract_date_part(s: &str) -> &str {
+    if let Some(t_pos) = s.find('T') {
+        &s[..t_pos]
+    } else {
+        s
+    }
+}
 
-            match (&value, &decoded) {
-                (Value::Date(d1), Value::Date(d2)) => {
-                    assert_eq!(d1.as_ref(), d2.as_ref());
-                }
-                _ => panic!("expected Date values"),
-            }
+/// Converts an ISO 8601 date string to a full datetime string at midnight UTC.
+///
+/// If the input already contains a time component, returns it unchanged.
+///
+/// Examples:
+/// - "2024-03-15" -> "2024-03-15T00:00:00.000Z"
+/// - "2024-03" -> "2024-03-01T00:00:00.000Z"
+/// - "2024" -> "2024-01-01T00:00:00.000Z"
+/// - "2024-03-15T14:30:00Z" -> "2024-03-15T14:30:00Z" (unchanged)
+pub fn date_to_datetime(s: &str) -> String {
+    // If already has time component, return as-is
+    if s.contains('T') {
+        return s.to_string();
+    }
+
+    // Handle BCE dates (with leading -)
+    let (prefix, date_part) = if let Some(rest) = s.strip_prefix('-') {
+        ("-", rest)
+    } else {
+        ("", s)
+    };
+
+    let parts: Vec<&str> = date_part.split('-').collect();
+
+    match parts.len() {
+        1 => {
+            // Year only -> YYYY-01-01T00:00:00.000Z
+            format!("{}{}-01-01T00:00:00.000Z", prefix, parts[0])
         }
+        2 => {
+            // Year-month -> YYYY-MM-01T00:00:00.000Z
+            format!("{}{}-{}-01T00:00:00.000Z", prefix, parts[0], parts[1])
+        }
+        3 => {
+            // Full date -> YYYY-MM-DDT00:00:00.000Z
+            format!("{}{}-{}-{}T00:00:00.000Z", prefix, parts[0], parts[1], parts[2])
+        }
+        _ => s.to_string(), // Invalid, return as-is
     }
 }

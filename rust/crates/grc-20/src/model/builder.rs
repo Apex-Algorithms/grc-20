@@ -347,11 +347,29 @@ impl<'a> EntityBuilder<'a> {
         self
     }
 
-    /// Adds a DATE value (ISO 8601 string like "2024-01-15" or "2024-01" or "2024").
+    /// Adds a DATE value (ISO 8601 date string).
     pub fn date(mut self, property: Id, value: impl Into<Cow<'a, str>>) -> Self {
         self.values.push(PropertyValue {
             property,
             value: Value::Date(value.into()),
+        });
+        self
+    }
+
+    /// Adds a TIME value (ISO 8601 time string with timezone).
+    pub fn time(mut self, property: Id, value: impl Into<Cow<'a, str>>) -> Self {
+        self.values.push(PropertyValue {
+            property,
+            value: Value::Time(value.into()),
+        });
+        self
+    }
+
+    /// Adds a DATETIME value (ISO 8601 datetime string).
+    pub fn datetime(mut self, property: Id, value: impl Into<Cow<'a, str>>) -> Self {
+        self.values.push(PropertyValue {
+            property,
+            value: Value::Datetime(value.into()),
         });
         self
     }
@@ -477,11 +495,29 @@ impl<'a> UpdateEntityBuilder<'a> {
         self
     }
 
-    /// Sets a DATE value.
+    /// Sets a DATE value (ISO 8601 date string).
     pub fn set_date(mut self, property: Id, value: impl Into<Cow<'a, str>>) -> Self {
         self.set_properties.push(PropertyValue {
             property,
             value: Value::Date(value.into()),
+        });
+        self
+    }
+
+    /// Sets a TIME value (ISO 8601 time string with timezone).
+    pub fn set_time(mut self, property: Id, value: impl Into<Cow<'a, str>>) -> Self {
+        self.set_properties.push(PropertyValue {
+            property,
+            value: Value::Time(value.into()),
+        });
+        self
+    }
+
+    /// Sets a DATETIME value (ISO 8601 datetime string).
+    pub fn set_datetime(mut self, property: Id, value: impl Into<Cow<'a, str>>) -> Self {
+        self.set_properties.push(PropertyValue {
+            property,
+            value: Value::Datetime(value.into()),
         });
         self
     }

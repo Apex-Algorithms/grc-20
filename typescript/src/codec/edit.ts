@@ -411,7 +411,7 @@ function readDictionaries(reader: Reader): WireDictionaries {
   for (let i = 0; i < propCount; i++) {
     const id = reader.readId();
     const dataTypeByte = reader.readByte();
-    if (dataTypeByte < 1 || dataTypeByte > 10) {
+    if (dataTypeByte < 1 || dataTypeByte > 12) {
       throw new DecodeError("E005", `invalid data type: ${dataTypeByte}`);
     }
     properties.push({ id, dataType: dataTypeByte as DataType });

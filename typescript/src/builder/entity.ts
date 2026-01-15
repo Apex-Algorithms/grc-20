@@ -83,12 +83,34 @@ export class EntityBuilder {
   }
 
   /**
-   * Adds a DATE value (ISO 8601 string like "2024-01-15" or "2024-01" or "2024").
+   * Adds a DATE value (ISO 8601 date string).
    */
   date(property: Id, value: string): this {
     this.values.push({
       property,
       value: { type: "date", value },
+    });
+    return this;
+  }
+
+  /**
+   * Adds a TIME value (ISO 8601 time string with timezone).
+   */
+  time(property: Id, value: string): this {
+    this.values.push({
+      property,
+      value: { type: "time", value },
+    });
+    return this;
+  }
+
+  /**
+   * Adds a DATETIME value (ISO 8601 datetime string).
+   */
+  datetime(property: Id, value: string): this {
+    this.values.push({
+      property,
+      value: { type: "datetime", value },
     });
     return this;
   }

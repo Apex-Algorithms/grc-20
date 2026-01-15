@@ -11,9 +11,11 @@ export enum DataType {
   Text = 5,
   Bytes = 6,
   Date = 7,
-  Schedule = 8,
-  Point = 9,
-  Embedding = 10,
+  Time = 8,
+  Datetime = 9,
+  Schedule = 10,
+  Point = 11,
+  Embedding = 12,
 }
 
 /**
@@ -60,6 +62,8 @@ export type Value =
   | { type: "text"; value: string; language?: Id }
   | { type: "bytes"; value: Uint8Array }
   | { type: "date"; value: string }
+  | { type: "time"; value: string }
+  | { type: "datetime"; value: string }
   | { type: "schedule"; value: string }
   | { type: "point"; lon: number; lat: number; alt?: number }
   | { type: "embedding"; subType: EmbeddingSubType; dims: number; data: Uint8Array };
@@ -83,6 +87,10 @@ export function valueDataType(value: Value): DataType {
       return DataType.Bytes;
     case "date":
       return DataType.Date;
+    case "time":
+      return DataType.Time;
+    case "datetime":
+      return DataType.Datetime;
     case "schedule":
       return DataType.Schedule;
     case "point":

@@ -22,7 +22,7 @@ GRC-20 v2 is a binary property graph format for decentralized knowledge networks
 | Entity | A node in the graph, identified by ID |
 | Relation | A directed edge between entities, identified by ID |
 | Object | Either an Entity or Relation (used when referencing both) |
-| Property | A named, typed attribute definition |
+| Property | An entity representing a named attribute |
 | Value | A property instance on an object |
 | Type | A classification tag for entities |
 | Op | An atomic operation that modifies graph state |
@@ -80,19 +80,16 @@ Types are tags, not classes: no inheritance, no cardinality constraints, no prop
 
 ### 2.4 Properties
 
-Properties define typed attributes:
+Properties are entities that define attributes. Property names, descriptions, and data types are defined via values and relations in the knowledge layer, not in the protocol.
 
 ```
-Property {
-  id: ID
-  data_type: DataType
-}
-
 DataType := BOOL | INT64 | FLOAT64 | DECIMAL | TEXT | BYTES
-          | DATE | SCHEDULE | POINT | EMBEDDING
+          | DATE | TIME | DATETIME | SCHEDULE | POINT | EMBEDDING
 ```
 
-Property names are defined via values in the knowledge layer, not in the protocol.
+**Data types in edits:** Each edit declares the data type for each property it uses (Section 4.3). All values for a given property within an edit MUST use the same data type. Different edits MAY use different data types for the same property—the data type is per-value metadata, not a global constraint.
+
+**Data type hints:** Property entities SHOULD have a `Data Type` relation (Section 7.3) pointing to a data type entity (Section 7.5) to indicate the expected type. This is advisory—applications use it for UX and query defaults, but the protocol does not enforce it.
 
 **Data type enum values:**
 
@@ -104,10 +101,12 @@ Property names are defined via values in the knowledge layer, not in the protoco
 | DECIMAL | 4 | Arbitrary-precision decimal |
 | TEXT | 5 | UTF-8 string |
 | BYTES | 6 | Opaque byte array |
-| DATE | 7 | ISO 8601 date string |
-| SCHEDULE | 8 | RFC 5545 schedule or availability |
-| POINT | 9 | WGS84 coordinate |
-| EMBEDDING | 10 | Dense vector |
+| DATE | 7 | ISO 8601 date (year, year-month, or year-month-day) |
+| TIME | 8 | ISO 8601 time with timezone |
+| DATETIME | 9 | ISO 8601 datetime |
+| SCHEDULE | 10 | RFC 5545 schedule or availability |
+| POINT | 11 | WGS84 coordinate |
+| EMBEDDING | 12 | Dense vector |
 
 **Data type semantics:**
 
@@ -119,7 +118,9 @@ Property names are defined via values in the knowledge layer, not in the protoco
 | DECIMAL | exponent + mantissa | value = mantissa × 10^exponent |
 | TEXT | UTF-8 string | Length-prefixed |
 | BYTES | Raw bytes | Length-prefixed, opaque |
-| DATE | UTF-8 string | ISO 8601 (variable precision) |
+| DATE | UTF-8 string | ISO 8601 date (YYYY, YYYY-MM, or YYYY-MM-DD) |
+| TIME | UTF-8 string | ISO 8601 time with timezone (HH:MM:SS[.frac]TZ) |
+| DATETIME | UTF-8 string | ISO 8601 datetime (YYYY-MM-DDTHH:MM:SS[.frac][TZ]) |
 | SCHEDULE | UTF-8 string | RFC 5545 iCalendar component |
 | POINT | 2-3 FLOAT64, little-endian | [lon, lat] or [lon, lat, alt] WGS84 |
 | EMBEDDING | sub_type + dims + bytes | Dense vector for similarity search |
@@ -145,21 +146,24 @@ Applications needing to preserve precision (e.g., "12.30" vs "12.3") should stor
 
 #### DATE
 
-Calendar dates with variable precision using the **proleptic Gregorian calendar**. Use DATE for semantic dates where precision matters (historical events, birthdays, publication years). Use INT64 for exact instants (microseconds since epoch).
+ISO 8601 calendar date with variable precision: year, year-month, or full date.
 
 ```
-"2024-03-15"         // Day precision
-"2024-03"            // Month precision
-"2024"               // Year only
-"-0100"              // 100 BCE (astronomical year -100)
+"2024"                           // Year only
+"2024-03"                        // Year-month
+"2024-03-15"                     // Full date
+"-0100"                          // 100 BCE (astronomical year -100)
+"-0100-03-15"                    // Full date in 101 BCE
 ```
+
+**Wire format:** Length-prefixed UTF-8 string.
 
 **Grammar (NORMATIVE):**
 ```abnf
 date        = year / year-month / year-month-day
 year        = [sign] 4DIGIT
-year-month  = [sign] 4DIGIT "-" 2DIGIT
-year-month-day = [sign] 4DIGIT "-" 2DIGIT "-" 2DIGIT
+year-month  = year "-" 2DIGIT
+year-month-day = year-month "-" 2DIGIT
 sign        = "+" / "-"
 ```
 
@@ -173,16 +177,77 @@ Week dates (`2024-W01`) and ordinal dates (`2024-001`) are NOT supported.
 - Year `-0001` = 2 BCE
 - Year `-0100` = 101 BCE
 
-This follows ISO 8601 extended year format. Note: historical "BCE" numbering has no year zero, so BCE year N = astronomical year -(N-1).
-
-**DATE vs INT64 timestamps:** DATE preserves the original precision and is stored as a string. For exact timestamps, use INT64 with microseconds since epoch. A birthday is a DATE ("1990-05-20"); a login event is an INT64 timestamp.
-
-**Sorting (NORMATIVE):** Indexers MUST parse DATE strings into a numeric representation for sorting. Lexicographical string sorting does NOT work for BCE years. Dates sort by their earliest possible UTC instant on the proleptic Gregorian calendar; when two dates resolve to the same instant, the more precise date sorts first (e.g., `2024-01-01` < `2024-01` < `2024`). Tie-break by byte comparison of the original string if instants and precisions are equal.
-
-**Validation (NORMATIVE):** DATE strings MUST conform to the grammar above. Full datetime with timezone (e.g., "2024-03-15T14:30Z") SHOULD use INT64 timestamp or SCHEDULE instead. Implementations MUST reject:
-- Month outside 01-12
+**Validation (NORMATIVE):** Implementations MUST reject:
+- Month outside 1-12
 - Day outside valid range for the month (considering leap years)
-- Malformed structure (wrong separators, wrong digit counts)
+- Malformed structure (wrong separators, non-numeric components)
+
+**Sorting (NORMATIVE):** DATE values sort lexicographically by their string representation. Year-only values sort before year-month values with the same year; year-month values sort before full dates with the same year-month.
+
+#### TIME
+
+ISO 8601 time of day with timezone. TIME values always include a timezone to ensure unambiguous interpretation.
+
+```
+"14:30:00Z"                      // UTC time
+"14:30:00.000Z"                  // With milliseconds
+"14:30:00+05:30"                 // With timezone offset
+"00:00:00Z"                      // Midnight UTC
+```
+
+**Wire format:** Length-prefixed UTF-8 string.
+
+**Grammar (NORMATIVE):**
+```abnf
+time-value  = time timezone
+time        = 2DIGIT ":" 2DIGIT ":" 2DIGIT [fraction]
+fraction    = "." 1*9DIGIT
+timezone    = "Z" / offset
+offset      = ("+" / "-") 2DIGIT ":" 2DIGIT
+            / ("+" / "-") 4DIGIT
+```
+
+**Validation (NORMATIVE):** Implementations MUST reject:
+- Hours > 23, minutes > 59, seconds > 60
+- Missing timezone
+- Malformed structure (wrong separators, non-numeric components)
+
+**Sorting (NORMATIVE):** TIME values sort by their UTC-normalized instant. When two values represent the same instant, the value with more precision sorts first. Tie-break by byte comparison.
+
+#### DATETIME
+
+ISO 8601 combined date and time. Timezone is optional; values without timezone are interpreted as local time (context-dependent).
+
+```
+"2024-03-15T14:30:00"            // Local time (no timezone)
+"2024-03-15T14:30:00Z"           // UTC
+"2024-03-15T14:30:00.000Z"       // With milliseconds
+"2024-03-15T14:30:00+05:30"      // With timezone offset
+"2025-11-18T05:00:00.000Z"       // Full precision datetime
+```
+
+**Wire format:** Length-prefixed UTF-8 string.
+
+**Grammar (NORMATIVE):**
+```abnf
+datetime    = year-month-day "T" time [timezone]
+year-month-day = year "-" 2DIGIT "-" 2DIGIT
+year        = [sign] 4DIGIT
+time        = 2DIGIT ":" 2DIGIT ":" 2DIGIT [fraction]
+fraction    = "." 1*9DIGIT
+timezone    = "Z" / offset
+offset      = ("+" / "-") 2DIGIT ":" 2DIGIT
+            / ("+" / "-") 4DIGIT
+sign        = "+" / "-"
+```
+
+**Validation (NORMATIVE):** Implementations MUST reject:
+- Month outside 1-12
+- Day outside valid range for the month (considering leap years)
+- Hours > 23, minutes > 59, seconds > 60
+- Malformed structure (wrong separators, non-numeric components)
+
+**Sorting (NORMATIVE):** DATETIME values sort by their UTC instant. Values without timezone are treated as UTC for sorting purposes. When two values represent the same instant, the value with more precision sorts first. Tie-break by byte comparison.
 
 #### SCHEDULE
 
@@ -254,7 +319,7 @@ Value {
 }
 ```
 
-The value encoding is determined by the property's `data_type`.
+The value encoding is determined by the data type declared for the property in the edit's properties dictionary (Section 4.3).
 
 **Value uniqueness:**
 
@@ -354,7 +419,7 @@ The auto-derived entity ID (`derived_uuid("grc20:relation-entity:" || relation_i
 
 ### 2.8 Schema Constraints
 
-Schema constraints (required properties, cardinality, patterns) are **not part of this specification**. They belong at the knowledge layer.
+Schema constraints (required properties, cardinality, patterns, data type enforcement) are **not part of this specification**. They belong at the knowledge layer. The protocol stores values with their declared types but does not enforce that a property always uses the same type across edits.
 
 ---
 
@@ -375,7 +440,6 @@ Op {
     UpdateRelation   = 6
     DeleteRelation   = 7
     RestoreRelation  = 8
-    CreateProperty   = 9
   }
 }
 ```
@@ -399,10 +463,10 @@ CreateEntity {
 UpdateEntity {
   id: ID
   set: List<Value>?            // LWW replace
-  unset: List<UnsetProperty>?
+  unset: List<UnsetValue>?
 }
 
-UnsetProperty {
+UnsetValue {
   property: ID
   language: ALL | ID?    // TEXT only: ALL = clear all, absent = non-linguistic, ID = specific language
 }
@@ -537,27 +601,11 @@ Transitions a DELETED relation back to ACTIVE state.
 
 **Reified entity lifecycle (NORMATIVE):** Deleting a relation does NOT delete its reified entity. The entity remains accessible and may hold values, be referenced by other relations, or be explicitly deleted via DeleteEntity. Orphaned reified entities are permitted; applications MAY garbage-collect them at a higher layer.
 
-### 3.4 Schema Operations
-
-**CreateProperty:**
-```
-CreateProperty {
-  id: ID
-  data_type: DataType
-}
-```
-
-**Semantics (NORMATIVE):** If the property does not exist, create it with the specified DataType. If the property already exists, the op is ignored—the original DataType is preserved (first-writer-wins). Properties are immutable once created.
-
-**DataType consistency (NORMATIVE):** An edit's properties dictionary MUST declare DataTypes consistent with the global schema. If a property was previously created with DataType X, all subsequent edits MUST declare it as X in their dictionary. Indexers SHOULD reject edits that declare inconsistent DataTypes for known properties.
-
-Types are entities created via CreateEntity. Type names and metadata are added as values in the knowledge layer.
-
-### 3.5 State Resolution
+### 3.4 State Resolution
 
 Operations are validated **structurally** at write time and **semantically** at read time.
 
-**Write-time:** Validate structure, append to log. No state lookups required except for DataType consistency checks (Section 8.1), which require knowledge of previously-established property DataTypes. Indexers SHOULD maintain a property ID → DataType index for efficient validation.
+**Write-time:** Validate structure, append to log. No state lookups required.
 
 **Read-time:** Replay operations in log order, apply resolution rules, return computed state.
 
@@ -568,11 +616,11 @@ Operations are validated **structurally** at write time and **semantically** at 
 3. Tombstone dominance: updates after delete are ignored
 4. Return resolved state or DELETED status
 
-### 3.6 Serializer Requirements
+### 3.5 Serializer Requirements
 
 Indexers are lenient and will process edits even if they contain redundant or contradictory operations. However, spec-compliant clients SHOULD NOT produce such edits. Serializers SHOULD automatically rewrite operations to ensure clean output.
 
-**Redundant property operations:** An UpdateEntity op MUST NOT include the same (property, language) in both `set` and `unset`. Serializers SHOULD squash by keeping only the `set` entry (since unset is applied first, the set would overwrite anyway).
+**Redundant value operations:** An UpdateEntity op MUST NOT include the same (property, language) in both `set` and `unset`. Serializers SHOULD squash by keeping only the `set` entry (since unset is applied first, the set would overwrite anyway).
 
 **Redundant relation field operations:** An UpdateRelation op MUST NOT include the same field in both set and `unset`. Serializers SHOULD squash by keeping only the set value.
 
@@ -596,7 +644,7 @@ Edit {
   name: string              // May be empty
   authors: List<ID>
   created_at: Timestamp
-  properties: List<(ID, DataType)>
+  properties: List<(ID, DataType)>  // Per-edit type declarations
   relation_type_ids: List<ID>
   language_ids: List<ID>    // Language entities for localized TEXT values
   unit_ids: List<ID>        // Unit entities for numerical values
@@ -606,6 +654,8 @@ Edit {
 ```
 
 Edits are standalone patches. They contain no parent references—ordering is provided by on-chain governance.
+
+**Properties dictionary:** The `properties` list declares the data type for each property used in this edit. All values for a given property within the edit use this type. Different edits MAY declare different types for the same property ID—there is no global type enforcement.
 
 **`created_at`** is metadata for audit/display only. It is NOT used for conflict resolution.
 
@@ -670,11 +720,11 @@ properties[1] = (ID of "age", INT64)
 relation_type_ids[0] = <ID of "Types" relation type>
 ```
 
-The property dictionary includes both ID and DataType. This allows values to omit type tags.
+The property dictionary includes both ID and DataType. This allows values to omit type tags and enables type-specific encoding.
 
-**Property dictionary requirement (NORMATIVE):** All properties referenced in an edit MUST be declared in the properties dictionary. External property references are not allowed.
+**Property dictionary requirement (NORMATIVE):** All properties referenced in an edit MUST be declared in the properties dictionary with a data type. All values for a given property within the edit use the declared type. External property references are not allowed.
 
-**CreateProperty and dictionary interaction:** The properties dictionary enables compact indexing within an edit. CreateProperty defines a property in the global schema. To create a new property AND use it in the same edit, include both: a CreateProperty op to define it, and an entry in the properties dictionary to reference it by index. The dictionary is for wire efficiency; CreateProperty is for schema persistence.
+**Per-edit typing:** The data type in the properties dictionary applies only to this edit. Different edits MAY declare different types for the same property ID. Indexers store values with their declared types and support querying by type.
 
 **Relation type dictionary requirement (NORMATIVE):** All relation types referenced in an edit MUST be declared in the `relation_type_ids` dictionary.
 
@@ -854,7 +904,6 @@ op_type values:
   6 = UpdateRelation
   7 = DeleteRelation
   8 = RestoreRelation
-  9 = CreateProperty
 ```
 
 **CreateEntity:**
@@ -877,9 +926,9 @@ flags: uint8
   values: Value[]
 [if has_unset]:
   count: varint
-  unset: UnsetProperty[]
+  unset: UnsetValue[]
 
-UnsetProperty:
+UnsetValue:
   property: PropertyRef
   language: varint    // 0xFFFFFFFF = clear all languages, otherwise LanguageRef (0 = non-linguistic, 1+ = specific language)
 ```
@@ -952,12 +1001,6 @@ id: ObjectRef
 id: ObjectRef
 ```
 
-**CreateProperty:**
-```
-id: ID
-data_type: uint8               // See DataType enum (Section 2.4)
-```
-
 ### 6.5 Value Encoding
 
 ```
@@ -986,7 +1029,7 @@ Decimal:
   if 0x01: len: varint, mantissa: bytes[len]
 Text: len: varint, data: UTF-8 bytes
 Bytes: len: varint, data: bytes
-Date: len: varint, data: UTF-8 bytes (ISO 8601)
+Date: format: uint8, len: varint, data: UTF-8 bytes (ISO 8601)
 Schedule: len: varint, data: UTF-8 bytes (RFC 5545)
 Point: ordinate_count: uint8 (2 or 3), longitude: Float64, latitude: Float64, [altitude: Float64]
 Embedding:
@@ -1024,11 +1067,13 @@ The Genesis Space provides well-known IDs for universal concepts. These are the 
 
 ### 7.1 Core Properties
 
-| Name | UUID | Data Type | Description |
-|------|------|-----------|-------------|
+| Name | UUID | Expected Type | Description |
+|------|------|---------------|-------------|
 | Name | `a126ca530c8e48d5b88882c734c38935` | TEXT | Primary label |
 | Description | `9b1f76ff9711404c861e59dc3fa7d037` | TEXT | Summary text |
 | Cover | `34f535072e6b42c5a84443981a77cfa2` | TEXT | Cover image URL |
+
+The "Expected Type" column indicates the advisory data type for each property. These properties SHOULD have a `Data Type` relation (Section 7.3) pointing to the corresponding data type entity (Section 7.5).
 
 ### 7.2 Core Type
 
@@ -1036,11 +1081,14 @@ The Genesis Space provides well-known IDs for universal concepts. These are the 
 |------|------|-------------|
 | Image | `f3f790c4c74e4d23a0a91e8ef84e30d9` | Image entity |
 
-### 7.3 Core Relation Type
+### 7.3 Core Relation Types
 
 | Name | UUID | Description |
 |------|------|-------------|
 | Types | `8f151ba4de204e3c9cb499ddf96f48f1` | Type membership |
+| Data Type | `84ce4adf1e9c4f52b9bdd6eeaa3004d8` | Property's expected data type |
+
+The `Data Type` relation connects a property entity to a data type entity (Section 7.5). This is advisory—applications use it for UX and query defaults, but the protocol does not enforce type consistency.
 
 ### 7.4 Language IDs
 
@@ -1068,6 +1116,30 @@ id = derived_uuid("grc20:genesis:language:" + bcp47_tag)
 
 **Canonicalization (NORMATIVE):** Language tags MUST be normalized to lowercase before derivation. For example, `"EN"`, `"En"`, and `"en"` all derive the same ID using `"en"`.
 
+### 7.5 Data Type Entities
+
+Data type entities represent the protocol's data types in the knowledge layer. Property entities use `Data Type` relations (Section 7.3) to indicate their expected type. IDs are derived:
+```
+id = derived_uuid("grc20:genesis:datatype:" + type_name)
+```
+
+| Name | Type Name | Derivation |
+|------|-----------|------------|
+| Bool | bool | `derived_uuid("grc20:genesis:datatype:bool")` |
+| Int64 | int64 | `derived_uuid("grc20:genesis:datatype:int64")` |
+| Float64 | float64 | `derived_uuid("grc20:genesis:datatype:float64")` |
+| Decimal | decimal | `derived_uuid("grc20:genesis:datatype:decimal")` |
+| Text | text | `derived_uuid("grc20:genesis:datatype:text")` |
+| Bytes | bytes | `derived_uuid("grc20:genesis:datatype:bytes")` |
+| Date | date | `derived_uuid("grc20:genesis:datatype:date")` |
+| Time | time | `derived_uuid("grc20:genesis:datatype:time")` |
+| Datetime | datetime | `derived_uuid("grc20:genesis:datatype:datetime")` |
+| Schedule | schedule | `derived_uuid("grc20:genesis:datatype:schedule")` |
+| Point | point | `derived_uuid("grc20:genesis:datatype:point")` |
+| Embedding | embedding | `derived_uuid("grc20:genesis:datatype:embedding")` |
+
+**Usage:** To indicate that property X expects INT64 values, create a `Data Type` relation from X to the Int64 entity. Applications query this relation to determine the expected type for UX rendering and query construction.
+
 ---
 
 ## 8. Validation
@@ -1088,7 +1160,7 @@ Indexers MUST reject edits that fail structural validation:
 | Value duplicates | Same `(property, language)` appears twice in values/set (canonical mode) |
 | Unset duplicates | Same `(property, language)` appears twice in unset (canonical mode) |
 | Language indices (TEXT) | Index not 0xFFFFFFFF and index > 0 and (index - 1) ≥ language_count |
-| UnsetProperty language (non-TEXT) | Language value is not 0xFFFFFFFF |
+| UnsetValue language (non-TEXT) | Language value is not 0xFFFFFFFF |
 | Unit indices (numerical) | Index > 0 and (index - 1) ≥ unit_count |
 | UTF-8 | Invalid encoding |
 | Varint encoding | Overlong encoding or exceeds 10 bytes |
@@ -1099,11 +1171,10 @@ Indexers MUST reject edits that fail structural validation:
 | BOOL values | Not 0x00 or 0x01 |
 | POINT bounds | Longitude outside [-180, +180] or latitude outside [-90, +90] |
 | POINT ordinate count | ordinate_count not 2 or 3 |
-| DATE format | Does not match grammar, invalid month (>12), invalid day for month |
+| DATE format | Format/string mismatch, invalid month (>12), invalid day, invalid time components |
 | Position strings | Empty, characters outside `0-9A-Za-z`, or length > 64 |
 | EMBEDDING dims | Data length doesn't match dims × bytes-per-element for subtype |
 | Zstd decompression | Decompressed size doesn't match declared `uncompressed_size` |
-| DataType consistency | Edit dictionary declares DataType different from established schema |
 | Float values | NaN payload (see float rules in Section 2.5) |
 | Relation entity self-reference | CreateRelation has explicit `entity` equal to relation ID |
 

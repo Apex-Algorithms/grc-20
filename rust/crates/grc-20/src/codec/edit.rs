@@ -12,7 +12,7 @@ use crate::codec::primitives::{Reader, Writer};
 use crate::error::{DecodeError, EncodeError};
 use crate::limits::{
     FORMAT_VERSION, MAGIC_COMPRESSED, MAGIC_UNCOMPRESSED, MAX_AUTHORS, MAX_DICT_SIZE,
-    MAX_EDIT_SIZE, MAX_OPS_PER_EDIT, MAX_STRING_LEN,
+    MAX_EDIT_SIZE, MAX_OPS_PER_EDIT, MAX_STRING_LEN, MIN_FORMAT_VERSION,
 };
 use crate::model::{DataType, DictionaryBuilder, Edit, Id, Op, WireDictionaries};
 
@@ -101,7 +101,7 @@ fn decode_edit_borrowed(input: &[u8]) -> Result<Edit<'_>, DecodeError> {
 
     // Version
     let version = reader.read_byte("version")?;
-    if version != FORMAT_VERSION {
+    if version < MIN_FORMAT_VERSION || version > FORMAT_VERSION {
         return Err(DecodeError::UnsupportedVersion { version });
     }
 
@@ -179,7 +179,7 @@ fn decode_edit_owned(data: &[u8]) -> Result<Edit<'static>, DecodeError> {
 
     // Version
     let version = reader.read_byte("version")?;
-    if version != FORMAT_VERSION {
+    if version < MIN_FORMAT_VERSION || version > FORMAT_VERSION {
         return Err(DecodeError::UnsupportedVersion { version });
     }
 
@@ -324,7 +324,9 @@ fn value_to_owned(v: crate::model::Value<'_>) -> crate::model::Value<'static> {
             language,
         },
         Value::Bytes(b) => Value::Bytes(Cow::Owned(b.into_owned())),
-        Value::Date(d) => Value::Date(Cow::Owned(d.into_owned())),
+        Value::Date(s) => Value::Date(Cow::Owned(s.into_owned())),
+        Value::Time(s) => Value::Time(Cow::Owned(s.into_owned())),
+        Value::Datetime(s) => Value::Datetime(Cow::Owned(s.into_owned())),
         Value::Schedule(s) => Value::Schedule(Cow::Owned(s.into_owned())),
         Value::Point { lon, lat, alt } => Value::Point { lon, lat, alt },
         Value::Embedding { sub_type, dims, data } => Value::Embedding {

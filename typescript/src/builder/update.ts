@@ -97,12 +97,34 @@ export class UpdateEntityBuilder {
   }
 
   /**
-   * Sets a DATE value.
+   * Sets a DATE value (ISO 8601 date string).
    */
   setDate(property: Id, value: string): this {
     this._set.push({
       property,
       value: { type: "date", value },
+    });
+    return this;
+  }
+
+  /**
+   * Sets a TIME value (ISO 8601 time string with timezone).
+   */
+  setTime(property: Id, value: string): this {
+    this._set.push({
+      property,
+      value: { type: "time", value },
+    });
+    return this;
+  }
+
+  /**
+   * Sets a DATETIME value (ISO 8601 datetime string).
+   */
+  setDatetime(property: Id, value: string): this {
+    this._set.push({
+      property,
+      value: { type: "datetime", value },
     });
     return this;
   }
